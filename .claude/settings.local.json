@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.sabah.com.tr)",
+      "WebFetch(domain:t24.com.tr)",
+      "WebFetch(domain:www.cumhuriyet.com.tr)",
+      "WebFetch(domain:medyascope.tv)",
+      "Bash(python3:*)",
+      "Bash(where python:*)",
+      "Bash(node:*)",
+      "Bash(npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --import-alias \"@/*\" --use-npm --turbopack)"
+    ]
+  }
+}
