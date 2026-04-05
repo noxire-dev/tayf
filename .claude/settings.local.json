@@ -9,7 +9,29 @@
       "Bash(where python:*)",
       "Bash(node:*)",
       "Bash(npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --import-alias \"@/*\" --use-npm --turbopack)",
-      "Bash(npx shadcn@latest init -d)"
+      "Bash(npx shadcn@latest init -d)",
+      "Bash(npm install:*)",
+      "Bash(npx shadcn@latest add card badge separator skeleton -o)",
+      "Bash(npm uninstall:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run:*)",
+      "Bash(curl -s \"https://www.sabah.com.tr/rss/anasayfa.xml\")",
+      "Bash(curl -s \"https://www.sozcu.com.tr/rss/tum-haberler.xml\")",
+      "Bash(curl -s \"https://www.cumhuriyet.com.tr/rss\")",
+      "Bash(curl -s \"https://www.diken.com.tr/feed/\")",
+      "Bash(curl -s \"https://www.ahaber.com.tr/rss/anasayfa.xml\")",
+      "Bash(curl -sL \"https://www.diken.com.tr/enflasyonda-artis-hizlandi/\")",
+      "Bash(curl -sL \"https://medyascope.tv\" -o /dev/null -w \"%{http_code}\")",
+      "Bash(curl -sL \"https://medyascope.tv/feed/\")",
+      "Bash(curl -sL \"https://tele1.com.tr/feed/\")",
+      "Bash(curl -sL \"https://www.diken.com.tr/feed/\")",
+      "Bash(curl -sL \"https://www.diken.com.tr/trump-irana-anlasma-icin-tanidigi-sureyi-bir-kez-daha-uzatti/\")",
+      "Bash(curl -sL \"https://medyascope.tv/2026/04/05/emeklilere-orgut-operasyonu/\")",
+      "Bash(npx shadcn@latest add input label select dialog -o)",
+      "Bash(git remote:*)",
+      "Bash(git push:*)",
+      "Bash(git branch:*)",
+      "Bash(npx next:*)"
     ]
   }
 }
