@@ -8,7 +8,8 @@
       "Bash(python3:*)",
       "Bash(where python:*)",
       "Bash(node:*)",
-      "Bash(npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --import-alias \"@/*\" --use-npm --turbopack)"
+      "Bash(npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --import-alias \"@/*\" --use-npm --turbopack)",
+      "Bash(npx shadcn@latest init -d)"
     ]
   }
 }
