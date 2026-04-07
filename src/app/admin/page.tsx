@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -36,7 +36,18 @@ import {
   Plus,
   Pencil,
   ExternalLink,
+  Filter,
 } from "lucide-react";
+import {
+  ALIGNMENT_META,
+  TRADITION_META,
+  SOURCE_TYPE_META,
+} from "@/types";
+import type {
+  AlignmentCategory,
+  TraditionCategory,
+  SourceType,
+} from "@/types";
 
 interface SourceItem {
   id: string;
@@ -44,7 +55,9 @@ interface SourceItem {
   slug: string;
   url: string;
   rss_url: string;
-  bias: string;
+  alignment: AlignmentCategory;
+  tradition: TraditionCategory;
+  source_type: SourceType;
   active: boolean;
 }
 
@@ -69,8 +82,26 @@ const EMPTY_SOURCE: SourceItem = {
   slug: "",
   url: "",
   rss_url: "",
-  bias: "independent",
+  alignment: "center",
+  tradition: "mainstream",
+  source_type: "general",
   active: true,
+};
+
+const ALIGNMENT_STYLES: Record<AlignmentCategory, string> = {
+  pro_government: "bg-red-600/15 text-red-400 border-red-600/20",
+  gov_leaning: "bg-red-400/15 text-red-300 border-red-400/20",
+  center: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20",
+  opposition_leaning: "bg-blue-400/15 text-blue-300 border-blue-400/20",
+  opposition: "bg-blue-600/15 text-blue-400 border-blue-600/20",
+};
+
+const ALIGNMENT_DOTS: Record<AlignmentCategory, string> = {
+  pro_government: "bg-red-600",
+  gov_leaning: "bg-red-400",
+  center: "bg-emerald-500",
+  opposition_leaning: "bg-blue-400",
+  opposition: "bg-blue-600",
 };
 
 export default function AdminPage() {
@@ -78,6 +109,11 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<ActionResult | null>(null);
+
+  // Filters
+  const [filterType, setFilterType] = useState<SourceType | "all">("all");
+  const [filterAlignment, setFilterAlignment] = useState<AlignmentCategory | "all">("all");
+  const [searchQuery, setSearchQuery] = useState("");
 
   // Source dialog state
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -99,6 +135,16 @@ export default function AdminPage() {
   useEffect(() => {
     fetchStats();
   }, [fetchStats]);
+
+  const filteredSources = useMemo(() => {
+    if (!stats?.sourcesList) return [];
+    return stats.sourcesList.filter((s) => {
+      if (filterType !== "all" && s.source_type !== filterType) return false;
+      if (filterAlignment !== "all" && s.alignment !== filterAlignment) return false;
+      if (searchQuery && !s.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+      return true;
+    });
+  }, [stats?.sourcesList, filterType, filterAlignment, searchQuery]);
 
   async function runAction(
     action: string,
@@ -145,7 +191,6 @@ export default function AdminPage() {
     setActionLoading("save_source");
     setLastResult(null);
 
-    // Auto-generate slug from name if empty
     const slug =
       editSource.slug ||
       editSource.name
@@ -309,16 +354,65 @@ export default function AdminPage() {
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-sm">Kaynaklar</CardTitle>
+            <CardTitle className="text-sm">
+              Kaynaklar
+              <span className="text-muted-foreground font-normal ml-2">
+                {filteredSources.length} / {stats?.sourcesList.length ?? 0}
+              </span>
+            </CardTitle>
             <Button size="sm" className="text-xs h-7" onClick={openAddDialog}>
               <Plus className="h-3 w-3 mr-1" />
               Kaynak Ekle
             </Button>
           </div>
+
+          {/* Filters */}
+          <div className="flex flex-wrap items-center gap-2 mt-3">
+            <Filter className="h-3.5 w-3.5 text-muted-foreground" />
+            <Input
+              placeholder="Kaynak ara..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="h-7 text-xs w-40"
+            />
+            <Select
+              value={filterType}
+              onValueChange={(v) => setFilterType(v as SourceType | "all")}
+            >
+              <SelectTrigger className="h-7 text-xs w-28">
+                <SelectValue placeholder="Tür" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Tüm Türler</SelectItem>
+                {(Object.keys(SOURCE_TYPE_META) as SourceType[]).map((t) => (
+                  <SelectItem key={t} value={t}>{SOURCE_TYPE_META[t].label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select
+              value={filterAlignment}
+              onValueChange={(v) => setFilterAlignment(v as AlignmentCategory | "all")}
+            >
+              <SelectTrigger className="h-7 text-xs w-36">
+                <SelectValue placeholder="Konum" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Tüm Konumlar</SelectItem>
+                {(Object.keys(ALIGNMENT_META) as AlignmentCategory[]).map((a) => (
+                  <SelectItem key={a} value={a}>
+                    <span className="flex items-center gap-2">
+                      <span className={`h-2 w-2 rounded-full ${ALIGNMENT_DOTS[a]}`} />
+                      {ALIGNMENT_META[a].label}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </CardHeader>
         <CardContent>
           <div className="space-y-1">
-            {stats?.sourcesList.map((source) => (
+            {filteredSources.map((source) => (
               <div
                 key={source.id}
                 className={`flex items-center justify-between rounded-lg px-3 py-2.5 transition-colors ${
@@ -327,14 +421,24 @@ export default function AdminPage() {
               >
                 <div className="flex items-center gap-2.5 min-w-0">
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-medium">{source.name}</span>
                       <Badge
                         variant="outline"
-                        className={`text-[10px] ${biasColor(source.bias)}`}
+                        className={`text-[10px] ${ALIGNMENT_STYLES[source.alignment]}`}
                       >
-                        {biasLabel(source.bias)}
+                        {ALIGNMENT_META[source.alignment].label}
                       </Badge>
+                      {source.tradition !== "mainstream" && (
+                        <Badge variant="outline" className="text-[10px] bg-muted/50 text-muted-foreground border-border">
+                          {TRADITION_META[source.tradition].label}
+                        </Badge>
+                      )}
+                      {source.source_type !== "general" && (
+                        <Badge variant="secondary" className="text-[10px]">
+                          {SOURCE_TYPE_META[source.source_type].label}
+                        </Badge>
+                      )}
                       {!source.active && (
                         <Badge variant="secondary" className="text-[10px]">
                           Devre Dışı
@@ -454,38 +558,68 @@ export default function AdminPage() {
               />
             </div>
 
-            <div className="space-y-1.5">
-              <Label className="text-xs">Yanlılık Etiketi</Label>
-              <Select
-                value={editSource.bias}
-                onValueChange={(value) =>
-                  value && setEditSource({ ...editSource, bias: value })
-                }
-              >
-                <SelectTrigger className="h-8 text-sm">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="pro_government">
-                    <span className="flex items-center gap-2">
-                      <span className="h-2 w-2 rounded-full bg-red-500" />
-                      Hükümete Yakın
-                    </span>
-                  </SelectItem>
-                  <SelectItem value="opposition">
-                    <span className="flex items-center gap-2">
-                      <span className="h-2 w-2 rounded-full bg-blue-500" />
-                      Muhalefet
-                    </span>
-                  </SelectItem>
-                  <SelectItem value="independent">
-                    <span className="flex items-center gap-2">
-                      <span className="h-2 w-2 rounded-full bg-green-500" />
-                      Bağımsız
-                    </span>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+            <div className="grid grid-cols-3 gap-2">
+              <div className="space-y-1.5">
+                <Label className="text-xs">Konum</Label>
+                <Select
+                  value={editSource.alignment}
+                  onValueChange={(value) =>
+                    value && setEditSource({ ...editSource, alignment: value as AlignmentCategory })
+                  }
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(Object.keys(ALIGNMENT_META) as AlignmentCategory[]).map((a) => (
+                      <SelectItem key={a} value={a}>
+                        <span className="flex items-center gap-2">
+                          <span className={`h-2 w-2 rounded-full ${ALIGNMENT_DOTS[a]}`} />
+                          {ALIGNMENT_META[a].label}
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs">Gelenek</Label>
+                <Select
+                  value={editSource.tradition}
+                  onValueChange={(value) =>
+                    value && setEditSource({ ...editSource, tradition: value as TraditionCategory })
+                  }
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(Object.keys(TRADITION_META) as TraditionCategory[]).map((t) => (
+                      <SelectItem key={t} value={t}>{TRADITION_META[t].label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs">Tür</Label>
+                <Select
+                  value={editSource.source_type}
+                  onValueChange={(value) =>
+                    value && setEditSource({ ...editSource, source_type: value as SourceType })
+                  }
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(Object.keys(SOURCE_TYPE_META) as SourceType[]).map((t) => (
+                      <SelectItem key={t} value={t}>{SOURCE_TYPE_META[t].label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
           </div>
 
@@ -593,30 +727,4 @@ function ActionRow({
       </Button>
     </div>
   );
-}
-
-function biasColor(bias: string) {
-  switch (bias) {
-    case "pro_government":
-      return "bg-red-500/15 text-red-400 border-red-500/20";
-    case "opposition":
-      return "bg-blue-500/15 text-blue-400 border-blue-500/20";
-    case "independent":
-      return "bg-green-500/15 text-green-400 border-green-500/20";
-    default:
-      return "";
-  }
-}
-
-function biasLabel(bias: string) {
-  switch (bias) {
-    case "pro_government":
-      return "Hükümete Yakın";
-    case "opposition":
-      return "Muhalefet";
-    case "independent":
-      return "Bağımsız";
-    default:
-      return bias;
-  }
 }

@@ -1,11 +1,14 @@
 import Parser from "rss-parser";
 import type { Source } from "@/types";
 
+const DEFAULT_HEADERS: Record<string, string> = {
+  "User-Agent": "Mozilla/5.0 (compatible; Tayf/1.0; +https://tayf.app)",
+  Accept: "application/rss+xml, application/xml, text/xml, application/atom+xml",
+};
+
 const parser = new Parser({
   timeout: 15000,
-  headers: {
-    Accept: "application/rss+xml, application/xml, text/xml",
-  },
+  headers: DEFAULT_HEADERS,
   customFields: {
     item: [
       ["media:content", "mediaContent", { keepArray: false }],
@@ -13,6 +16,8 @@ const parser = new Parser({
       ["media:group", "mediaGroup", { keepArray: false }],
       ["enclosure", "enclosure", { keepArray: false }],
       ["content:encoded", "contentEncoded"],
+      // CNN Türk (and others) put images as <image>URL</image> inside <item>
+      ["image", "itemImage"],
     ],
   },
 });
@@ -25,10 +30,14 @@ export interface RawFeedItem {
   contentEncoded?: string;
   pubDate?: string;
   isoDate?: string;
-  enclosure?: { url?: string; type?: string };
+  enclosure?: { url?: string; type?: string; $?: { url?: string; type?: string } };
   mediaContent?: { $?: { url?: string } };
   mediaThumbnail?: { $?: { url?: string } };
-  mediaGroup?: { "media:content"?: { $?: { url?: string } }; "media:thumbnail"?: { $?: { url?: string } } };
+  mediaGroup?: {
+    "media:content"?: { $?: { url?: string } };
+    "media:thumbnail"?: { $?: { url?: string } };
+  };
+  itemImage?: string | { url?: string };
   [key: string]: unknown;
 }
 
@@ -38,12 +47,10 @@ export interface FetchResult {
   error?: string;
 }
 
-// T24 blocks default user agents
+// Per-source header overrides (merged on top of DEFAULT_HEADERS)
 const SOURCE_HEADERS: Record<string, Record<string, string>> = {
-  t24: {
-    "User-Agent":
-      "Mozilla/5.0 (compatible; Tayf/1.0; +https://tayf.app)",
-  },
+  // Add source-specific overrides here if a site blocks the bot UA.
+  // Example: "some-slug": { "User-Agent": "Mozilla/5.0 ..." },
 };
 
 export async function fetchAllFeeds(
@@ -65,14 +72,43 @@ export async function fetchAllFeeds(
 
 async function fetchSingleFeed(source: Source): Promise<FetchResult> {
   const extraHeaders = SOURCE_HEADERS[source.slug] || {};
+  const headers = { ...DEFAULT_HEADERS, ...extraHeaders };
 
-  const feed = await parser.parseURL(source.rss_url);
+  // Fetch XML manually so we can use per-source headers,
+  // then parse with rss-parser's parseString.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
 
-  return {
-    source,
-    items: (feed.items || []).map((item) => ({
-      ...item,
-      ...extraHeaders,
-    })) as RawFeedItem[],
-  };
+  try {
+    const response = await fetch(source.rss_url, {
+      signal: controller.signal,
+      headers,
+      redirect: "follow",
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return {
+        source,
+        items: [],
+        error: `HTTP ${response.status} from ${source.slug}`,
+      };
+    }
+
+    const xml = await response.text();
+    const feed = await parser.parseString(xml);
+
+    return {
+      source,
+      items: (feed.items || []) as unknown as RawFeedItem[],
+    };
+  } catch (err) {
+    clearTimeout(timeout);
+    return {
+      source,
+      items: [],
+      error: (err as Error).message,
+    };
+  }
 }

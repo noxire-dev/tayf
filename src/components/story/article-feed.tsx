@@ -2,14 +2,16 @@
 
 import { useState, useMemo } from "react";
 import { ArticleCard } from "./article-card";
+import { ArticleDetailDialog } from "./article-detail-dialog";
 import { CategoryFilter } from "./category-filter";
-import { BiasSpectrum } from "./bias-spectrum";
-import type { Article, BiasDistribution, NewsCategory } from "@/types";
+import { AlignmentSpectrum } from "./bias-spectrum";
+import type { Article, AlignmentDistribution, NewsCategory } from "@/types";
 
 export function ArticleFeed({ articles }: { articles: Article[] }) {
   const [selectedCategory, setSelectedCategory] = useState<
     NewsCategory | "all"
   >("all");
+  const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
 
   // Count articles per category
   const categoryCounts = useMemo(() => {
@@ -27,15 +29,17 @@ export function ArticleFeed({ articles }: { articles: Article[] }) {
     return articles.filter((a) => a.category === selectedCategory);
   }, [articles, selectedCategory]);
 
-  // Bias distribution for filtered articles
+  // Alignment distribution for filtered articles
   const distribution = useMemo(() => {
-    const d: BiasDistribution = {
+    const d: AlignmentDistribution = {
       pro_government: 0,
+      gov_leaning: 0,
+      center: 0,
+      opposition_leaning: 0,
       opposition: 0,
-      independent: 0,
     };
     for (const article of filtered) {
-      if (article.source?.bias) d[article.source.bias]++;
+      if (article.source?.alignment) d[article.source.alignment]++;
     }
     return d;
   }, [filtered]);
@@ -56,14 +60,18 @@ export function ArticleFeed({ articles }: { articles: Article[] }) {
         <p className="text-[11px] text-muted-foreground mb-1.5">
           Kaynak dağılımı — {filtered.length} haber
         </p>
-        <BiasSpectrum distribution={distribution} />
+        <AlignmentSpectrum distribution={distribution} />
       </div>
 
       {/* Article grid */}
       {filtered.length > 0 ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
           {filtered.map((article) => (
-            <ArticleCard key={article.id} article={article} />
+            <ArticleCard
+              key={article.id}
+              article={article}
+              onClick={() => setSelectedArticle(article)}
+            />
           ))}
         </div>
       ) : (
@@ -73,6 +81,16 @@ export function ArticleFeed({ articles }: { articles: Article[] }) {
           </p>
         </div>
       )}
+
+      {/* Article detail dialog */}
+      <ArticleDetailDialog
+        article={selectedArticle}
+        allArticles={articles}
+        open={!!selectedArticle}
+        onOpenChange={(open) => {
+          if (!open) setSelectedArticle(null);
+        }}
+      />
     </div>
   );
 }

@@ -1,20 +1,19 @@
-import type { BiasDistribution } from "@/types";
+import type { AlignmentDistribution } from "@/types";
 
 const SEGMENTS = [
-  { key: "pro_government" as const, color: "bg-red-500", dot: "bg-red-400", label: "Hükümete Yakın" },
-  { key: "independent" as const, color: "bg-green-500", dot: "bg-green-400", label: "Bağımsız" },
-  { key: "opposition" as const, color: "bg-blue-500", dot: "bg-blue-400", label: "Muhalefet" },
+  { key: "pro_government" as const, color: "bg-red-600", dot: "bg-red-500", label: "İktidar" },
+  { key: "gov_leaning" as const, color: "bg-red-400", dot: "bg-red-300", label: "İktidara Yakın" },
+  { key: "center" as const, color: "bg-emerald-500", dot: "bg-emerald-400", label: "Merkez" },
+  { key: "opposition_leaning" as const, color: "bg-blue-400", dot: "bg-blue-300", label: "Muhalefete Yakın" },
+  { key: "opposition" as const, color: "bg-blue-600", dot: "bg-blue-500", label: "Muhalefet" },
 ];
 
-export function BiasSpectrum({
+export function AlignmentSpectrum({
   distribution,
 }: {
-  distribution: BiasDistribution;
+  distribution: AlignmentDistribution;
 }) {
-  const total =
-    distribution.pro_government +
-    distribution.opposition +
-    distribution.independent;
+  const total = Object.values(distribution).reduce((a, b) => a + b, 0);
 
   if (total === 0) return null;
 
@@ -34,7 +33,7 @@ export function BiasSpectrum({
       </div>
 
       {/* Legend */}
-      <div className="flex gap-3">
+      <div className="flex flex-wrap gap-3">
         {active.map((segment) => (
           <span key={segment.key} className="flex items-center gap-1 text-[10px] text-muted-foreground">
             <span className={`inline-block h-1.5 w-1.5 rounded-full ${segment.dot}`} />

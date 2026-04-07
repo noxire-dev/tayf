@@ -21,8 +21,9 @@ export async function GET() {
 
   const { data: sourcesList } = await supabase
     .from("sources")
-    .select("id, name, slug, url, rss_url, bias, active")
-    .order("bias");
+    .select("id, name, slug, url, rss_url, alignment, tradition, source_type, active")
+    .order("alignment")
+    .order("tradition");
 
   return NextResponse.json({
     articles: articleCount ?? 0,
@@ -77,8 +78,8 @@ export async function POST(request: Request) {
     }
 
     case "add_source": {
-      const { name, slug, url, rss_url, bias } = body;
-      if (!name || !slug || !url || !rss_url || !bias) {
+      const { name, slug, url, rss_url, alignment, tradition, source_type } = body;
+      if (!name || !slug || !url || !rss_url || !alignment) {
         return NextResponse.json({ error: "All fields are required" }, { status: 400 });
       }
       const { error } = await supabase.from("sources").insert({
@@ -86,7 +87,9 @@ export async function POST(request: Request) {
         slug,
         url,
         rss_url,
-        bias,
+        alignment,
+        tradition: tradition || "mainstream",
+        source_type: source_type || "general",
         active: true,
       });
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -94,14 +97,16 @@ export async function POST(request: Request) {
     }
 
     case "update_source": {
-      const { id, name, slug, url, rss_url, bias, active } = body;
+      const { id, name, slug, url, rss_url, alignment, tradition, source_type, active } = body;
       if (!id) return NextResponse.json({ error: "Source id is required" }, { status: 400 });
       const updates: Record<string, unknown> = {};
       if (name !== undefined) updates.name = name;
       if (slug !== undefined) updates.slug = slug;
       if (url !== undefined) updates.url = url;
       if (rss_url !== undefined) updates.rss_url = rss_url;
-      if (bias !== undefined) updates.bias = bias;
+      if (alignment !== undefined) updates.alignment = alignment;
+      if (tradition !== undefined) updates.tradition = tradition;
+      if (source_type !== undefined) updates.source_type = source_type;
       if (active !== undefined) updates.active = active;
       const { error } = await supabase.from("sources").update(updates).eq("id", id);
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });

@@ -31,7 +31,13 @@
       "Bash(git remote:*)",
       "Bash(git push:*)",
       "Bash(git branch:*)",
-      "Bash(npx next:*)"
+      "Bash(npx next:*)",
+      "Bash(curl:*)",
+      "Bash(xargs grep:*)",
+      "WebFetch(domain:ground.news)",
+      "WebSearch",
+      "WebFetch(domain:help.ground.news)",
+      "Bash(npx supabase:*)"
     ]
   }
 }

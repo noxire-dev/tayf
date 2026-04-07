@@ -8,38 +8,35 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { BiasBadge } from "./bias-badge";
+import { AlignmentBadge, TraditionBadge } from "./bias-badge";
 import { CategoryBadge } from "./category-badge";
-import { Newspaper, Clock, ExternalLink } from "lucide-react";
+import { Newspaper, Clock } from "lucide-react";
+import { timeAgo } from "@/lib/utils";
 import type { Article } from "@/types";
 
-function timeAgo(dateStr: string): string {
-  const now = new Date();
-  const date = new Date(dateStr);
-  const diffMs = now.getTime() - date.getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-
-  if (diffMin < 1) return "az önce";
-  if (diffMin < 60) return `${diffMin}dk önce`;
-  const diffHours = Math.floor(diffMin / 60);
-  if (diffHours < 24) return `${diffHours}sa önce`;
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffDays === 1) return "dün";
-  return `${diffDays}g önce`;
-}
-
-export function ArticleCard({ article }: { article: Article }) {
+export function ArticleCard({
+  article,
+  onClick,
+}: {
+  article: Article;
+  onClick?: () => void;
+}) {
   const [imgError, setImgError] = useState(false);
   const showImage = article.image_url && !imgError;
 
   return (
-    <Card className="group overflow-hidden border-border/50 hover:border-border transition-all hover:shadow-md">
-      <a
-        href={article.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="block h-full"
+    <Card className="group overflow-hidden border-border/50 hover:border-border transition-all hover:shadow-md cursor-pointer">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onClick}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onClick?.();
+          }
+        }}
+        className="block h-full outline-none"
       >
         {/* Image or placeholder */}
         <div className="relative aspect-[16/9] overflow-hidden bg-muted">
@@ -63,7 +60,6 @@ export function ArticleCard({ article }: { article: Article }) {
               <span className="text-xs font-medium text-white/90">
                 {article.source?.name}
               </span>
-              <ExternalLink className="h-3 w-3 text-white/50 opacity-0 group-hover:opacity-100 transition-opacity" />
             </div>
           </div>
 
@@ -78,8 +74,16 @@ export function ArticleCard({ article }: { article: Article }) {
         {/* Content */}
         <CardHeader className="p-3 pb-1.5">
           <div className="flex items-center gap-2 mb-1">
-            {article.source && <BiasBadge bias={article.source.bias} size="sm" />}
-            <span className="flex items-center gap-1 text-[10px] text-muted-foreground ml-auto" suppressHydrationWarning>
+            {article.source && (
+              <>
+                <AlignmentBadge alignment={article.source.alignment} size="sm" />
+                <TraditionBadge tradition={article.source.tradition} size="sm" />
+              </>
+            )}
+            <span
+              className="flex items-center gap-1 text-[10px] text-muted-foreground ml-auto"
+              suppressHydrationWarning
+            >
               <Clock className="h-2.5 w-2.5" />
               {timeAgo(article.published_at)}
             </span>
@@ -96,7 +100,7 @@ export function ArticleCard({ article }: { article: Article }) {
             </CardDescription>
           </CardContent>
         )}
-      </a>
+      </div>
     </Card>
   );
 }

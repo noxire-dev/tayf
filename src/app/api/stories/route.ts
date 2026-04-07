@@ -10,7 +10,8 @@ export async function GET(request: Request) {
 
   const { data: articles, error } = await supabase
     .from("articles")
-    .select("*, source:sources(*)")
+    .select("*, source:sources!inner(*)")
+    .eq("source.active", true)
     .order("published_at", { ascending: false })
     .range(offset, offset + limit - 1);
 

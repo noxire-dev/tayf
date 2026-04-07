@@ -1,29 +1,31 @@
-import type { BiasCategory, BiasDistribution } from "@/types";
+import type { AlignmentCategory, AlignmentDistribution } from "@/types";
 
-export function calculateBiasDistribution(
-  biasLabels: BiasCategory[]
-): BiasDistribution {
-  const distribution: BiasDistribution = {
+export function calculateAlignmentDistribution(
+  alignments: AlignmentCategory[]
+): AlignmentDistribution {
+  const distribution: AlignmentDistribution = {
     pro_government: 0,
+    gov_leaning: 0,
+    center: 0,
+    opposition_leaning: 0,
     opposition: 0,
-    independent: 0,
   };
 
-  for (const bias of biasLabels) {
-    distribution[bias]++;
+  for (const alignment of alignments) {
+    distribution[alignment]++;
   }
 
   return distribution;
 }
 
-export function detectBlindspot(distribution: BiasDistribution): {
+export function detectBlindspot(distribution: AlignmentDistribution): {
   isBlindspot: boolean;
-  blindspotSide: BiasCategory | null;
+  blindspotSide: AlignmentCategory | null;
 } {
-  const categories = Object.entries(distribution) as [BiasCategory, number][];
+  const categories = Object.entries(distribution) as [AlignmentCategory, number][];
   const nonZero = categories.filter(([, count]) => count > 0);
 
-  // Blindspot = only one bias category covers this story
+  // Blindspot = only one alignment category covers this story
   if (nonZero.length === 1) {
     return {
       isBlindspot: true,

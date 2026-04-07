@@ -1,0 +1,146 @@
+#,Outlet,Main RSS URL,Bias/Lean,Type,Language,Priority,Ownership/Notes,Status
+1,Sabah,https://www.sabah.com.tr/rss/gundem.xml,Pro-Government,Newspaper,TR,P0,Turkuaz/Kalyon Group,Active
+2,A Haber,https://www.ahaber.com.tr/rss/gundem.xml,Pro-Government,TV/Online,TR,P0,Turkuaz Media Group,Active
+3,Yeni Şafak,https://www.yenisafak.com/rss?xml=gundem,Pro-Government,Newspaper,TR/EN,P0,Albayrak Group,Active
+4,Yeni Akit,https://www.yeniakit.com.tr/rss/haber/gundem,Pro-Government,Newspaper,TR,P1,Islamist/conservative,Active
+5,Star,http://www.star.com.tr/rss/sondakika.xml,Pro-Government,Newspaper,TR,P1,ES Media,Active
+6,Takvim,https://www.takvim.com.tr/rss/anasayfa.xml,Pro-Government,Newspaper,TR,P1,Turkuaz Media Group,Active
+7,Diriliş Postası,https://www.dirilispostasi.com/rss,Pro-Government,Newspaper,TR,P2,Conservative/Islamist,Active
+8,Türkiye Gazetesi,https://www.turkiyegazetesi.com.tr/rss/rss.xml,Pro-Government,Newspaper,TR,P1,İhlas Holding,Active
+9,GZT,https://www.gzt.com/rss,Pro-Government,Online,TR,P2,Youth-oriented conservative,Active
+10,Vahdet,https://www.vahdet.com.tr/rss,Pro-Government,Newspaper,TR,P2,Islamist daily,Verify
+11,Yenisöz,https://www.yenisoz.com.tr/rss,Pro-Government,Newspaper,TR,P2,Conservative,Verify
+12,İstiklal,https://www.istiklal.com.tr/rss,Pro-Government,Newspaper,TR,P2,Conservative nationalist,Verify
+13,Habertürk,https://www.haberturk.com/rss,Gov-Leaning,TV/Newspaper,TR,P0,Ciner Group,Active
+14,Hürriyet,https://www.hurriyet.com.tr/rss/anasayfa,Gov-Leaning,Newspaper,TR/EN,P0,Demirören Group; largest circ.,Active
+15,Milliyet,http://www.milliyet.com.tr/rss/rssNew/gundemRss.xml,Gov-Leaning,Newspaper,TR,P0,Demirören Group,Active
+16,CNN Türk,https://www.cnnturk.com/feed/rss/all/news,Gov-Leaning,TV/Online,TR,P0,Demirören Group,Active
+17,NTV,https://www.ntv.com.tr/gundem.rss,Gov-Leaning,TV/Online,TR,P0,Doğuş Group,Active
+18,Posta,http://www.posta.com.tr/xml/rss/rss_3_0.xml,Gov-Leaning,Newspaper,TR,P1,Demirören Group; tabloid,Active
+19,Akşam,https://www.aksam.com.tr/rss/rss.asp,Gov-Leaning,Newspaper,TR,P1,Ethem Sancak era,Active
+20,Güneş,https://www.gunes.com/rss,Gov-Leaning,Newspaper,TR,P2,Demirören Group,Verify
+21,Yeni Asır,https://www.yeniasir.com.tr/rss/anasayfa.xml,Gov-Leaning,Newspaper,TR,P2,Demirören; Izmir-focused,Active
+22,Milat,http://www.milatgazetesi.com/rss.php,Gov-Leaning,Newspaper,TR,P2,Conservative,Active
+23,Şok,https://www.sok.com.tr/rss,Gov-Leaning,Newspaper,TR,P2,Tabloid,Verify
+24,En Son Haber,https://www.ensonhaber.com/rss/ensonhaber.xml,Gov-Leaning,Portal,TR,P1,News portal,Active
+25,Mynet,https://www.mynet.com/haber/rss/sondakika,Gov-Leaning,Portal,TR,P1,News portal/aggregator,Active
+26,Haber Global,https://haberglobal.com.tr/rss,Gov-Leaning,TV/Online,TR,P1,Ciner Group,Active
+27,İnternet Haber,https://www.internethaber.com/rss,Gov-Leaning,Portal,TR,P2,,Active
+28,Haber7,https://i12.haber7.net/sondakika/newsstand/latest.xml,Gov-Leaning,Portal,TR,P1,,Active
+29,TGRT Haber,http://www.tgrthaber.com.tr/feed/index.rss,Gov-Leaning,TV,TR,P2,İhlas Holding,Verify
+30,Haberler.com,https://rss.haberler.com/RssNew.aspx,Gov-Leaning,Portal,TR,P1,Major aggregator,Active
+31,Anadolu Ajansı (AA),https://www.aa.com.tr/tr/rss/default?cat=guncel,State Media,Agency,TR/EN,P0,State-run wire service,Active
+32,TRT Haber,http://www.trthaber.com/sondakika.rss,State Media,TV/Online,TR/EN,P0,Public broadcaster,Active
+33,TRT World,https://www.trtworld.com/news/rss,State Media,TV/Online,EN,P0,English-language public broadcaster,Active
+34,A News (anews.com.tr),https://www.anews.com.tr/rss/news.xml,State Media,Online,EN,P1,Turkuvaz; English digital,Active
+35,Daily Sabah,https://www.dailysabah.com/rss/home-page,State Media,Newspaper,EN,P0,Turkuvaz; English daily,Active
+36,T24,https://t24.com.tr/rss,Center/Independent,Online,TR,P0,Independent digital-native,Active
+37,Diken,https://www.diken.com.tr/feed/,Center/Independent,Online,TR,P0,Independent digital-native,Active
+38,Medyascope,https://medyascope.tv/feed/,Center/Independent,Online/Video,TR,P0,Ruşen Çakır; video-first,Active
+39,Journo,https://journo.com.tr/feed,Center/Independent,Online,TR,P0,Newsletter/analysis,Active
+40,Gazete Duvar,https://www.gazeteduvar.com.tr/export/rss,Center/Independent,Online,TR,P0,Independent,Active
+41,Bianet,https://bianet.org/biamag.rss,Center/Independent,Online,TR/EN,P1,Human rights focus,Active
+42,Ekonomim,https://www.ekonomim.com/export/rss,Center/Independent,Online,TR,P1,Economy-focused,Active
+43,Dünya,https://www.dunya.com/rss?dunya,Center/Independent,Newspaper,TR,P1,Business newspaper,Active
+44,Independent Türkçe,https://www.indyturk.com/rss.xml,Center/Independent,Online,TR,P1,Turkish ed. of The Independent,Active
+45,Karar,https://www.karar.com/service/rss.php,Center/Independent,Newspaper,TR,P1,Conservative but independent,Active
+46,Dokuz8 Haber,https://www.dokuz8haber.net/rss,Center/Independent,Online,TR,P2,Citizen journalism network,Active
+47,Fayn,https://www.fayn.press/rss/,Center/Independent,Online,TR,P2,Newer independent,Active
+48,Gazete Oksijen,https://gazeteoksijen.com/export/rss,Center/Independent,Online,TR,P1,Independent,Active
+49,Gazete Pencere,https://www.gazetepencere.com/service/rss.php,Center/Independent,Online,TR,P2,Independent,Active
+50,Gerçek Gündem,https://www.gercekgundem.com/rss,Center/Independent,Online,TR,P2,Independent,Active
+51,Onedio,https://onedio.com/Publisher/publisher-gundem.rss,Center/Independent,Portal,TR,P2,Listicle/viral,Active
+52,Habervakti,https://www.habervakti.com/rss,Center/Independent,Online,TR,P2,,Active
+53,F5 Haber,https://www.f5haber.com/export/rss,Center/Independent,Online,TR,P2,,Active
+54,Platform 24,http://platform24.org/rss,Center/Independent,Online,TR,P2,Media freedom focus,Verify
+55,Açık Gazete,https://www.acikgazete.com/feed/,Center/Independent,Online,TR,P2,,Active
+56,Ajans Haber,https://www.ajanshaber.com/rss,Center/Independent,Online,TR,P2,,Active
+57,Haber3,https://www.haber3.com/rss,Center/Independent,Portal,TR,P2,,Active
+58,Son Dakika,http://rss.sondakika.com/rss_standart.asp,Center/Independent,Portal,TR,P2,,Verify
+59,Beyaz Gazete,https://beyazgazete.com/rss/guncel.xml,Center/Independent,Portal,TR,P2,,Active
+60,Sözcü,https://www.sozcu.com.tr/feeds-rss-category-sozcu,Opposition-Leaning,Newspaper,TR,P0,Highest circ. opposition,Active
+61,Cumhuriyet,https://www.cumhuriyet.com.tr/rss/son_dakika.xml,Opposition-Leaning,Newspaper,TR,P0,Oldest independent daily,Active
+62,Halk TV,https://halktv.com.tr/service/rss.php,Opposition-Leaning,TV/Online,TR,P0,CHP-aligned,Active
+63,Tele1,https://www.tele1.com.tr/rss,Opposition-Leaning,TV/Online,TR,P0,Opposition TV,Active
+64,Korkusuz,https://www.korkusuz.com.tr/feeds/rss,Opposition-Leaning,Newspaper,TR,P1,Secularist opposition,Active
+65,Artı Gerçek,https://artigercek.com/service/rss.php,Opposition-Leaning,Online,TR,P1,,Active
+66,Kısa Dalga,https://kisadalga.net/service/rss.php,Opposition-Leaning,Online,TR,P1,,Active
+67,Demokrat Haber,https://www.demokrathaber.org/rss,Opposition-Leaning,Online,TR,P2,,Active
+68,OdaTV,https://www.odatv.com/rss.xml,Opposition-Leaning,Online,TR,P1,Nationalist/secular,Active
+69,KRT TV,https://www.krttv.com.tr/rss,Opposition-Leaning,TV,TR,P2,,Active
+70,Artı Bir TV,http://www.haberartibir.com.tr/rss.php,Opposition-Leaning,TV,TR,P2,,Verify
+71,İleri Haber,http://ilerihaber.org/rss.xml,Opposition-Leaning,Online,TR,P2,,Verify
+72,En Politik,https://www.enpolitik.com/rss.xml,Opposition-Leaning,Online,TR,P2,,Active
+73,Medya Gazete,https://www.medyagazete.com/rss/genel-0,Opposition-Leaning,Online,TR,P2,,Active
+74,Muhalif,https://www.muhalif.com.tr/rss/genel-0,Opposition-Leaning,Online,TR,P2,,Active
+75,Elips Haber,https://www.elipshaber.com/rss,Opposition-Leaning,Online,TR,P2,,Active
+76,BirGün,https://www.birgun.net/rss/home,Opposition,Newspaper,TR,P0,Left-wing daily,Active
+77,Evrensel,https://www.evrensel.net/rss/haber.xml,Opposition,Newspaper,TR,P1,Socialist/labor,Active
+78,Serbestiyet,https://serbestiyet.com/feed/,Opposition,Online,TR,P2,Liberal opposition,Active
+79,Agos,https://www.agos.com.tr/rss,Opposition,Newspaper,TR,P2,Armenian-Turkish; minority,Active
+80,Sol Haber,http://haber.sol.org.tr/rss.xml,Opposition,Online,TR,P2,Far-left portal,Verify
+81,Sendika.Org,http://haberss.org/dosya/rss/sendika.org,Opposition,Online,TR,P2,Labor/union news,Verify
+82,Ekol TV,https://www.ekoltv.com.tr/service/rss.php,Opposition,TV,TR,P2,,Active
+83,Yeniçağ,http://www.yenicaggazetesi.com.tr/rss,Nationalist,Newspaper,TR,P1,MHP/nationalist leaning,Active
+84,Aydınlık,https://www.aydinlik.com.tr/feed,Nationalist,Newspaper,TR,P1,Perinçek/Vatan Party line,Active
+85,Ortadoğu,https://www.ortadogugazetesi.com/rss,Nationalist,Newspaper,TR,P2,MHP-linked,Verify
+86,Ulusal Kanal,http://www.ulusalkanal.com.tr/rss.php,Nationalist,TV,TR,P2,Vatan Party,Verify
+87,Milli Gazete,https://www.milligazete.com.tr/rss,Islamist/Conservative,Newspaper,TR,P1,Saadet Party organ,Active
+88,Yeni Asya,https://www.yeniasya.com.tr/rss,Islamist/Conservative,Newspaper,TR,P2,Nurcu movement,Verify
+89,Yeni Mesaj,http://www.yenimesaj.com.tr/rss.php,Islamist/Conservative,Newspaper,TR,P2,Conservative,Active
+90,Diyanet Haber,https://www.diyanethaber.com.tr/rss,Islamist/Conservative,Online,TR,P2,Religious affairs,Active
+91,Doğru Haber,https://dogruhaber.com.tr/rss,Islamist/Conservative,Online,TR,P2,,Active
+92,Mezopotamya Ajansı (MA),https://mezopotamyaajansi43.com/feed/,Pro-Kurdish,Agency,TR/KU,P1,Domain changes frequently due to bans,Verify
+93,BHA (Bianet),https://bha.net.tr/rss,Pro-Kurdish,Agency,TR,P2,Kurdish news agency,Active
+94,Rûdaw Türkçe,http://rudaw.net/turkish/rss?type=top,Pro-Kurdish,Online,TR,P2,Kurdish/Iraqi Kurdistan,Active
+95,BBC Türkçe,https://feeds.bbci.co.uk/turkce/rss.xml,International,Online,TR,P0,BBC Turkish service,Active
+96,DW Türkçe,https://rss.dw.com/rdf/rss-tur-all,International,Online,TR,P0,Deutsche Welle Turkish,Active
+97,Euronews Türkçe,https://tr.euronews.com/rss,International,TV/Online,TR,P1,Euronews Turkish,Active
+98,VOA Türkçe,https://www.voaturkce.com/api/zr$ymetqvi,International,Online,TR,P1,Voice of America Turkish,Verify
+99,Sputnik Türkçe,https://tr.sputniknews.com/export/rss2/archive/index.xml,International,Online,TR,P1,Russian state media,Active
+100,CGTN Türk,https://www.cgtnturk.com/rss,International,Online,TR,P2,Chinese state media,Active
+101,Al Ain Türkçe,https://tr.al-ain.com/feed,International,Online,TR,P2,UAE-backed,Active
+102,Al Jazeera Turk,http://aljazeera.com.tr/rss.xml,International,Online,TR,P2,Qatari; may be discontinued,Verify
+103,Ahval News,https://ahvalnews.com/rss.xml,International,Online,EN,P1,Independent EN; Turkey-focused,Verify
+104,Hürriyet Daily News,https://www.hurriyetdailynews.com/rss,International,Newspaper,EN,P0,Oldest EN daily in Turkey,Active
+105,Türkiye Today,https://www.turkiyetoday.com/feed/,International,Online,EN,P2,Newer English outlet,Verify
+106,DHA (Doğan Haber Ajansı),http://www.dha.com.tr/rss.asp,Gov-Leaning,Agency,TR,P1,Demirören; wire service,Verify
+107,İHA (İhlas Haber Ajansı),http://www.iha.com.tr/rss.aspx,Gov-Leaning,Agency,TR,P1,İhlas; wire service,Verify
+108,Bloomberg HT,http://www.bloomberght.com/rss,Center/Independent,TV/Online,TR,P0,Top finance channel,Active
+109,Finansal Gündem,http://www.finansgundem.com/rss,Center/Independent,Online,TR,P2,Finance news,Active
+110,BigPara (Hürriyet),http://bigpara.hurriyet.com.tr/rss/,Gov-Leaning,Online,TR,P2,Hürriyet finance portal,Active
+111,Investing.com TR,https://tr.investing.com/rss/news_288.rss,Center/Independent,Online,TR,P1,Finance/markets,Active
+112,Paraanaliz,https://www.paraanaliz.com/feed/,Center/Independent,Online,TR,P2,Finance analysis,Verify
+113,Fotomaç,https://www.fotomac.com.tr/rss/anasayfa.xml,Gov-Leaning,Newspaper,TR,P1,Demirören sports daily,Active
+114,Fanatik,https://www.fanatik.com.tr/rss/anasayfa.xml,Gov-Leaning,Newspaper,TR,P1,Demirören sports daily,Active
+115,A Spor,https://www.aspor.com.tr/rss/anasayfa.xml,Pro-Government,TV/Online,TR,P1,Turkuaz sports channel,Active
+116,NTV Spor,https://www.ntvspor.net/rss/anasayfa,Gov-Leaning,Online,TR,P1,Doğuş Group sports,Active
+117,AjansSpor,https://ajansspor.com/rss,Center/Independent,Online,TR,P2,,Active
+118,Fotospor,https://www.fotospor.com/feed/rss_sondakika.xml,Center/Independent,Online,TR,P2,,Active
+119,Kontraspor,https://kontraspor.com/rss,Center/Independent,Online,TR,P2,,Active
+120,MFA Turkey,https://www.mfa.gov.tr/rss.en.mfa,State Media,Government,EN,P2,Min. of Foreign Affairs,Active
+121,TOBB,https://www.tobb.org.tr/Sayfalar/RssFeeder.php?List=Haberler,Center/Independent,Institutional,TR,P2,Union of Chambers,Active
+122,Artı Gerçek,https://artigercek.com/service/rss.php,Opposition-Leaning,Online,TR,P1,Founded by Can Dündar,Active
+123,NewsLab Turkey,https://www.newslabturkey.org/feed/,Center/Independent,Online,TR,P2,Media lab/innovation,Active
+124,İklim Haber,https://www.iklimhaber.org/feed/,Center/Independent,Online,TR,P2,Climate news,Active
+125,Hukuki Haber,https://www.hukukihaber.net/rss,Center/Independent,Online,TR,P2,Legal news,Active
+126,İşçi Haber,https://www.iscihaber.net/rss/news,Opposition,Online,TR,P2,Labor news,Active
+127,Bengütürk,https://www.benguturk.com/rss,Nationalist,TV,TR,P2,Nationalist TV,Active
+128,Dijital Gaste,https://www.dijitalgaste.com/rss,Center/Independent,Online,TR,P2,,Active
+129,dikGAZETE,https://www.dikgazete.com/xml/rss.xml,Center/Independent,Online,TR,P2,,Active
+130,Gazete.net,https://gazete.net/rss,Center/Independent,Portal,TR,P2,,Active
+131,Haberport,https://www.haberport.com/rss/latest-posts,Center/Independent,Online,TR,P2,,Active
+132,Bir Gazete,https://www.birgazete.com/feed,Center/Independent,Online,TR,P2,,Active
+133,ABC Haber,https://abcgazetesi.com.tr/rss,Center/Independent,Online,TR,P2,,Active
+134,10Haber,https://10haber.net/feed/,Center/Independent,Online,TR,P2,,Active
+135,Aykırı,https://www.aykiri.com.tr/rss.xml,Center/Independent,Online,TR,P2,,Active
+136,Ayandon,https://www.ayandon.com.tr/rss.xml,Center/Independent,Online,TR,P2,,Active
+137,Haberet,https://www.haberet.com/export/rss,Center/Independent,Online,TR,P2,,Active
+138,Haber.com,https://www.haber.com/rss,Center/Independent,Portal,TR,P2,,Active
+139,İşin Detayı,https://www.isindetayi.com/rss/gundem,Center/Independent,Online,TR,P2,,Active
+140,Kamudanhaber,https://www.kamudanhaber.net/rss,Center/Independent,Online,TR,P2,Civil servant news,Active
+141,Türkiye Haber Ajansı,http://www.turkiyehaberajansi.com/rss.xml,Center/Independent,Agency,TR,P2,,Active
+142,Eko Seyir,http://www.ekoseyir.com/rss/piyasalar/248.xml,Center/Independent,Online,TR,P2,Finance/markets,Verify
+143,Ay Gazete,http://www.aygazete.com/rss/gundem-haberleri,Center/Independent,Online,TR,P2,,Verify
+144,İlke TV,https://ilketv.com.tr/feed/,Islamist/Conservative,TV,TR,P2,,Active
+145,Haberiniz,https://haberiniz.com.tr/feed/,Center/Independent,Online,TR,P2,,Active

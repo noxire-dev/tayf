@@ -130,6 +130,13 @@ function extractImage(item: RawFeedItem): string | null {
 
   if (fromFields) return fromFields;
 
+  // Non-standard <image>URL</image> inside <item> (CNN Türk, etc.)
+  const itemImg = item.itemImage;
+  if (itemImg) {
+    const imgUrl = typeof itemImg === "string" ? itemImg : itemImg.url;
+    if (imgUrl && isValidImageUrl(imgUrl)) return imgUrl;
+  }
+
   // Fallback: extract first <img src="..."> from HTML content
   const htmlContent = item.contentEncoded || item.content || "";
   if (htmlContent) {
@@ -142,11 +149,14 @@ function extractImage(item: RawFeedItem): string | null {
 }
 
 function getImageEnclosure(item: RawFeedItem): string | null {
-  if (!item.enclosure?.url) return null;
+  if (!item.enclosure) return null;
+  // Atom feeds nest enclosure attributes under $, RSS feeds put them at top level
+  const url = item.enclosure.url || item.enclosure.$?.url;
+  const type = item.enclosure.type || item.enclosure.$?.type || "";
+  if (!url) return null;
   // Some feeds have non-image enclosures (audio/video)
-  const type = item.enclosure.type || "";
   if (type && !type.startsWith("image/")) return null;
-  return item.enclosure.url;
+  return url;
 }
 
 function isValidImageUrl(url: string): boolean {

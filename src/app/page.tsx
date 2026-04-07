@@ -12,7 +12,8 @@ export default async function HomePage() {
     const supabase = createServerClient();
     const result = await supabase
       .from("articles")
-      .select("*, source:sources(*)")
+      .select("*, source:sources!inner(*)")
+      .eq("source.active", true)
       .order("published_at", { ascending: false })
       .limit(120);
     articles = (result.data as Article[]) || [];
