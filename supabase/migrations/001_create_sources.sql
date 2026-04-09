@@ -4,7 +4,11 @@ create table if not exists sources (
   slug text not null unique,
   url text not null,
   rss_url text not null,
-  bias text not null check (bias in ('pro_government', 'opposition', 'independent')),
+  bias text not null check (bias in (
+    'pro_government', 'gov_leaning', 'state_media', 'center',
+    'opposition_leaning', 'opposition', 'nationalist',
+    'islamist_conservative', 'pro_kurdish', 'international'
+  )),
   logo_url text,
   active boolean not null default true,
   created_at timestamptz not null default now()
