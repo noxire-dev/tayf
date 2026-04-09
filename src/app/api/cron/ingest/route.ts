@@ -3,21 +3,88 @@ import { createServerClient } from "@/lib/supabase/server";
 import { fetchAllFeeds } from "@/lib/rss/fetcher";
 import { normalizeArticles } from "@/lib/rss/normalize";
 import { batchFetchOgImages } from "@/lib/rss/og-image";
+import {
+  apiError,
+  apiUnauthorized,
+  withApiErrors,
+} from "@/lib/api/errors";
+import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import type { Source } from "@/types";
 
 export const maxDuration = 120;
 
-export async function GET(request: Request) {
+// Manual / cron ingest is expensive (RSS + OG fetches against many upstreams),
+// so cap at 5 burst then refill ~1/min. Vercel Cron and the admin "Çek"
+// button each count as one client by IP — the tmux worker bypasses HTTP
+// entirely and is unaffected.
+const ingestLimit = createRateLimiter("cron-ingest", {
+  capacity: 5,
+  refillPerSecond: 1 / 60,
+});
+
+/**
+ * Manual-trigger ingest endpoint (historically "cron/ingest").
+ *
+ * DUAL-PATH ARCHITECTURE
+ * ----------------------
+ * Tayf has two ingestion paths that share the same `articles` table:
+ *
+ *   1. PRIMARY — `scripts/rss-worker.mjs` runs continuously in a tmux pane
+ *      on the dev/prod host, looping every 60 seconds. This is the normal
+ *      path and is owned by the main team.
+ *
+ *   2. FALLBACK / MANUAL — this HTTP route. It is used by:
+ *        - The admin panel "Çek" button (`runAction("ingest")` → `/api/admin`
+ *          → this route) for one-off manual refreshes.
+ *        - Vercel Cron (see `vercel.json`) as a fallback when the project
+ *          is deployed to a host without background workers.
+ *
+ * Both paths upsert with `onConflict: "url"` so duplicate rows are impossible,
+ * but running them concurrently wastes DNS, bandwidth, and Supabase quota.
+ * To avoid that we do a 30-second recent-insert check below: if the tmux
+ * worker inserted any article in the last 30 seconds it is still live, so
+ * this manual invocation returns `{ skipped: true, reason: "worker active" }`
+ * instead of re-ingesting.
+ */
+export const GET = withApiErrors(async (request: Request) => {
   // Verify cron secret in production
   const authHeader = request.headers.get("authorization");
   if (
     process.env.CRON_SECRET &&
     authHeader !== `Bearer ${process.env.CRON_SECRET}`
   ) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return apiUnauthorized();
+  }
+
+  const rl = ingestLimit(clientKey(request));
+  if (!rl.allowed) {
+    return apiError(429, "Too many requests", {
+      details: { retryAfterMs: rl.retryAfterMs },
+    });
   }
 
   const supabase = createServerClient();
+
+  // 0. Skip if the tmux RSS worker is already active. We detect this by
+  // counting rows inserted in the last 30 seconds — the worker cycles every
+  // 60s, so any recent insert means the worker is handling ingestion and
+  // this manual trigger would just duplicate the fetch work.
+  const thirtySecondsAgo = new Date(Date.now() - 30_000).toISOString();
+  const { count: recentInserts, error: recentErr } = await supabase
+    .from("articles")
+    .select("*", { count: "exact", head: true })
+    .gte("created_at", thirtySecondsAgo);
+
+  // Only honor the skip on a successful count. On error, fall through and
+  // run the ingest anyway — a broken guard shouldn't break the manual path.
+  if (!recentErr && (recentInserts ?? 0) > 0) {
+    return NextResponse.json({
+      skipped: true,
+      reason: "worker active",
+      recent_inserts: recentInserts ?? 0,
+      timestamp: new Date().toISOString(),
+    });
+  }
 
   // 1. Fetch active sources
   const { data: sources, error: sourcesError } = await supabase
@@ -26,10 +93,11 @@ export async function GET(request: Request) {
     .eq("active", true);
 
   if (sourcesError || !sources?.length) {
-    return NextResponse.json(
-      { error: "Failed to fetch sources", details: sourcesError?.message },
-      { status: 500 }
-    );
+    return apiError(500, "Failed to fetch sources", {
+      details: sourcesError?.message
+        ? { supabase: sourcesError.message }
+        : undefined,
+    });
   }
 
   // 2. Fetch all RSS feeds in parallel
@@ -98,4 +166,4 @@ export async function GET(request: Request) {
     sources: sourceResults,
     timestamp: new Date().toISOString(),
   });
-}
+});

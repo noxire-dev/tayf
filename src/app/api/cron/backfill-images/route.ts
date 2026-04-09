@@ -1,23 +1,56 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { fetchOgImage } from "@/lib/rss/og-image";
+import {
+  apiError,
+  apiUnauthorized,
+  withApiErrors,
+} from "@/lib/api/errors";
+import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
 export const maxDuration = 120;
 
+// Backfill is the slowest path (per-article HTML fetch). Same shape as the
+// ingest limiter: 5 burst, ~1 token per minute thereafter.
+const backfillLimit = createRateLimiter("cron-backfill-images", {
+  capacity: 5,
+  refillPerSecond: 1 / 60,
+});
+
 /**
- * Backfill og:image for articles that are missing images.
- * Hit this endpoint once to fix existing articles, then rely on the
- * regular ingest cron which now fetches og:image automatically.
+ * Canonical og:image backfill endpoint.
  *
- * Processes in batches of 20 to stay within timeout.
+ * DUAL-PATH ARCHITECTURE NOTE
+ * ---------------------------
+ * Unlike `/api/cron/ingest`, this route has NO continuous worker equivalent.
+ * The tmux RSS worker (`scripts/rss-worker.mjs`) intentionally does NOT
+ * follow article URLs to extract og:image — that belongs to this path so
+ * one slow upstream page cannot stall the 60-second ingest cycle.
+ *
+ * This endpoint is the single source of truth for og:image backfill and
+ * is invoked by:
+ *   - The admin panel "Kapak Resimleri" button
+ *     (`runAction("backfill_images")` → `/api/admin` → this route).
+ *   - Manual / ad-hoc curl runs during development.
+ *
+ * It pulls the 30 oldest image-less articles, fetches og:image with
+ * bounded concurrency, and updates them in place. Run it repeatedly until
+ * the `remaining` field says "all done".
  */
-export async function GET(request: Request) {
+export const GET = withApiErrors(async (request: Request) => {
   const authHeader = request.headers.get("authorization");
   if (
     process.env.CRON_SECRET &&
     authHeader !== `Bearer ${process.env.CRON_SECRET}`
   ) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return apiUnauthorized();
+  }
+
+  const rl = backfillLimit(clientKey(request));
+  if (!rl.allowed) {
+    return apiError(429, "Too many requests", {
+      details: { retryAfterMs: rl.retryAfterMs },
+    });
   }
 
   const supabase = createServerClient();
@@ -31,7 +64,7 @@ export async function GET(request: Request) {
     .limit(30);
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return apiError(500, error.message);
   }
 
   if (!articles?.length) {
@@ -71,4 +104,4 @@ export async function GET(request: Request) {
     failed,
     remaining: articles.length === 30 ? "more articles may need images, run again" : "all done",
   });
-}
+});
