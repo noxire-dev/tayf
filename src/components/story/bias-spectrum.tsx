@@ -1,20 +1,109 @@
-import type { AlignmentDistribution } from "@/types";
+import type { BiasDistribution, BiasCategory, MediaDnaZone } from "@/types";
+import {
+  BIAS_COLORS,
+  BIAS_ORDER,
+  BIAS_SHORT_LABELS,
+  zoneOf,
+} from "@/lib/bias/config";
+import { BIAS_BADGE_CONFIG } from "./bias-badge";
 
-const SEGMENTS = [
-  { key: "pro_government" as const, color: "bg-red-600", dot: "bg-red-500", label: "İktidar" },
-  { key: "gov_leaning" as const, color: "bg-red-400", dot: "bg-red-300", label: "İktidara Yakın" },
-  { key: "center" as const, color: "bg-emerald-500", dot: "bg-emerald-400", label: "Merkez" },
-  { key: "opposition_leaning" as const, color: "bg-blue-400", dot: "bg-blue-300", label: "Muhalefete Yakın" },
-  { key: "opposition" as const, color: "bg-blue-600", dot: "bg-blue-500", label: "Muhalefet" },
+// Spectrum segments are derived from the canonical order + color palette in
+// `@/lib/bias/config`. Keeping a local `SEGMENTS` array here lets us pre-bake
+// the shape (key / color / dot / label) the render loop wants without chasing
+// the palette at every render.
+const SEGMENTS: Array<{
+  key: BiasCategory;
+  color: string;
+  dot: string;
+  label: string;
+}> = BIAS_ORDER.map((key) => ({
+  key,
+  color: BIAS_COLORS[key].solid,
+  dot: BIAS_COLORS[key].dot,
+  label: BIAS_SHORT_LABELS[key],
+}));
+
+// Card-mode (compact) segments — collapses the 10 bias categories to the
+// 3 Medya DNA zones so cluster cards stay scannable in ~2s. Tailwind class
+// strings are kept literal so the JIT picks them up at build.
+const ZONE_SEGMENTS: Array<{
+  key: MediaDnaZone;
+  color: string;
+  dot: string;
+  label: string;
+}> = [
+  { key: "iktidar", color: "bg-red-500", dot: "bg-red-400", label: "İktidar" },
+  { key: "bagimsiz", color: "bg-zinc-400", dot: "bg-zinc-300", label: "Bağımsız" },
+  { key: "muhalefet", color: "bg-emerald-500", dot: "bg-emerald-400", label: "Muhalefet" },
 ];
 
-export function AlignmentSpectrum({
-  distribution,
-}: {
-  distribution: AlignmentDistribution;
-}) {
-  const total = Object.values(distribution).reduce((a, b) => a + b, 0);
+interface BiasSpectrumProps {
+  distribution: BiasDistribution;
+  /**
+   * When true, collapse the 10 bias categories into the 3 Medya DNA zones
+   * (iktidar / bağımsız / muhalefet) so cluster cards render a glanceable
+   * 3-segment bar instead of the full 10-segment spectrum. The detail page
+   * keeps `compact` off so the full breakdown stays visible there.
+   */
+  compact?: boolean;
+}
 
+export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProps) {
+  if (compact) {
+    const zones: Record<MediaDnaZone, number> = {
+      iktidar: 0,
+      bagimsiz: 0,
+      muhalefet: 0,
+    };
+    for (const [bias, count] of Object.entries(distribution) as Array<
+      [BiasCategory, number]
+    >) {
+      zones[zoneOf(bias)] += count;
+    }
+    const zoneTotal = zones.iktidar + zones.bagimsiz + zones.muhalefet;
+    if (zoneTotal === 0) return null;
+
+    const activeZones = ZONE_SEGMENTS.filter((z) => zones[z.key] > 0);
+
+    return (
+      <div className="space-y-2">
+        {/* Bar */}
+        <div className="flex h-2 w-full gap-px overflow-hidden rounded-full bg-muted">
+          {activeZones.map((segment) => {
+            const pct = Math.round((zones[segment.key] / zoneTotal) * 100);
+            return (
+              <div
+                key={segment.key}
+                title={`${segment.label}: ${zones[segment.key]} kaynak (${pct}%)`}
+                className={`${segment.color} transition-all duration-500`}
+                style={{ width: `${(zones[segment.key] / zoneTotal) * 100}%` }}
+              />
+            );
+          })}
+        </div>
+
+        {/* Legend */}
+        <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+          {activeZones.map((segment) => {
+            const pct = Math.round((zones[segment.key] / zoneTotal) * 100);
+            return (
+              <span
+                key={segment.key}
+                title={`${segment.label}: ${zones[segment.key]} kaynak (${pct}%)`}
+                className="flex items-center gap-1 text-[11px] text-muted-foreground"
+              >
+                <span className={`inline-block h-2 w-2 rounded-full ${segment.dot}`} />
+                {segment.label}
+                <span className="text-muted-foreground/60">{pct}%</span>
+              </span>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  const total = SEGMENTS.reduce((sum, s) => sum + distribution[s.key], 0);
   if (total === 0) return null;
 
   const active = SEGMENTS.filter((s) => distribution[s.key] > 0);
@@ -22,28 +111,40 @@ export function AlignmentSpectrum({
   return (
     <div className="space-y-2">
       {/* Bar */}
-      <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-muted">
-        {active.map((segment) => (
-          <div
-            key={segment.key}
-            className={`${segment.color} transition-all duration-500`}
-            style={{ width: `${(distribution[segment.key] / total) * 100}%` }}
-          />
-        ))}
+      <div className="flex h-2 w-full gap-px overflow-hidden rounded-full bg-muted">
+        {active.map((segment) => {
+          const pct = Math.round((distribution[segment.key] / total) * 100);
+          return (
+            <div
+              key={segment.key}
+              title={`${segment.label}: ${distribution[segment.key]} kaynak (${pct}%)`}
+              className={`${segment.color} transition-all duration-500`}
+              style={{ width: `${(distribution[segment.key] / total) * 100}%` }}
+            />
+          );
+        })}
       </div>
 
       {/* Legend */}
-      <div className="flex flex-wrap gap-3">
-        {active.map((segment) => (
-          <span key={segment.key} className="flex items-center gap-1 text-[10px] text-muted-foreground">
-            <span className={`inline-block h-1.5 w-1.5 rounded-full ${segment.dot}`} />
-            {segment.label}
-            <span className="text-muted-foreground/60">
-              {Math.round((distribution[segment.key] / total) * 100)}%
+      <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+        {active.map((segment) => {
+          const pct = Math.round((distribution[segment.key] / total) * 100);
+          return (
+            <span
+              key={segment.key}
+              title={`${segment.label}: ${distribution[segment.key]} kaynak (${pct}%)`}
+              className="flex items-center gap-1 text-[11px] text-muted-foreground"
+            >
+              <span className={`inline-block h-2 w-2 rounded-full ${segment.dot}`} />
+              {segment.label}
+              <span className="text-muted-foreground/60">{pct}%</span>
             </span>
-          </span>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 }
+
+// Re-exported for components that want just the palette lookup.
+export { BIAS_BADGE_CONFIG };

@@ -1,0 +1,100 @@
+import { getSourceMetadata, type Factuality } from "@/lib/sources/factuality";
+import { cn } from "@/lib/utils";
+
+/**
+ * `<SourceChips>` — Server Component that surfaces hand-tagged factuality
+ * and ownership signals next to a source name.
+ *
+ * Background: Tayf currently shows zero factuality / ownership context on
+ * a story card, while Ground News surfaces both as small chips. This is
+ * the missing primitive — once it's wired into `cluster-card.tsx` and
+ * `cluster-stance.tsx` (follow-up task), every source mention will carry
+ * the same lineage info.
+ *
+ * Behavior:
+ *   - Looks up the slug in `SOURCE_METADATA`.
+ *   - If unknown → renders nothing (no skeleton, no placeholder). This
+ *     keeps partial coverage safe; we can ship the data file
+ *     incrementally without churning every consuming layout.
+ *   - If known → renders up to two small chips: factuality + ownership.
+ *     Either field may be `null` independently.
+ *
+ * Design notes:
+ *   - Server-only. No state, no hooks. Tailwind classes are kept as
+ *     literals (no dynamic interpolation) so the JIT picks them up.
+ *   - Visual scale matches the existing `SourceChip` primitive in
+ *     `src/components/story/source-chip.tsx` (text-[10px], rounded-full,
+ *     border + tinted background) so the two can sit next to each other
+ *     without a size jump.
+ *   - Color palette intentionally subdued — these are *metadata* chips,
+ *     not bias signals, and we don't want them to compete visually with
+ *     the bias chip already on the card.
+ */
+
+const FACTUALITY_LABELS: Record<Factuality, string> = {
+  high: "Yüksek doğruluk",
+  mixed: "Karışık doğruluk",
+  low: "Düşük doğruluk",
+};
+
+const FACTUALITY_CLASSES: Record<Factuality, string> = {
+  high: "bg-emerald-500/10 text-emerald-700 border-emerald-500/20 dark:text-emerald-400",
+  mixed: "bg-amber-500/10 text-amber-700 border-amber-500/20 dark:text-amber-400",
+  low: "bg-red-500/10 text-red-700 border-red-500/20 dark:text-red-400",
+};
+
+const FACTUALITY_DOT: Record<Factuality, string> = {
+  high: "bg-emerald-500",
+  mixed: "bg-amber-500",
+  low: "bg-red-500",
+};
+
+const CHIP_BASE =
+  "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap";
+
+const OWNERSHIP_CLASS =
+  "bg-zinc-500/10 text-zinc-700 border-zinc-500/20 dark:text-zinc-300";
+
+export interface SourceChipsProps {
+  /** Source slug (matches `slug` column in the `sources` table). */
+  slug: string;
+  /** Optional extra classes appended to the wrapping flex row. */
+  className?: string;
+}
+
+export function SourceChips({ slug, className }: SourceChipsProps) {
+  const meta = getSourceMetadata(slug);
+  if (!meta) return null;
+  if (meta.factuality === null && meta.ownership === null) return null;
+
+  return (
+    <span
+      className={cn("inline-flex items-center gap-1", className)}
+      aria-label="Kaynak bilgisi"
+    >
+      {meta.factuality !== null && (
+        <span
+          className={cn(CHIP_BASE, FACTUALITY_CLASSES[meta.factuality])}
+          title={FACTUALITY_LABELS[meta.factuality]}
+        >
+          <span
+            className={cn(
+              "h-1.5 w-1.5 rounded-full",
+              FACTUALITY_DOT[meta.factuality],
+            )}
+            aria-hidden="true"
+          />
+          {FACTUALITY_LABELS[meta.factuality]}
+        </span>
+      )}
+      {meta.ownership !== null && (
+        <span
+          className={cn(CHIP_BASE, OWNERSHIP_CLASS)}
+          title={`Sahiplik: ${meta.ownership}`}
+        >
+          {meta.ownership}
+        </span>
+      )}
+    </span>
+  );
+}

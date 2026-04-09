@@ -26,25 +26,58 @@ function normalizeItem(
   source: Source,
   item: RawFeedItem
 ): NormalizedArticle {
-  const title = (item.title || "").trim();
+  // Decode any stray HTML entities in the title (haberler.com double-encodes;
+  // see `decodeEntities` above).
+  const title = decodeEntities((item.title || "").trim()).trim();
   const url = (item.link || "").trim();
+
+  // Normalize relative URLs by prefixing with the source's base URL
+  let normalizedUrl = url;
+  if (normalizedUrl.startsWith("/")) {
+    // Strip any trailing slash from source.url and prepend
+    const baseUrl = source.url.replace(/\/+$/, "");
+    normalizedUrl = baseUrl + normalizedUrl;
+  } else if (!/^https?:\/\//i.test(normalizedUrl)) {
+    // Any other relative form (no scheme) → also prefix
+    const baseUrl = source.url.replace(/\/+$/, "") + "/";
+    normalizedUrl = baseUrl + normalizedUrl.replace(/^\/+/, "");
+  }
+
   const description = cleanDescription(item.contentSnippet || item.content);
   const imageUrl = extractImage(item);
   const publishedAt = parseDate(item.isoDate || item.pubDate);
-  const contentHash = SHA256(title + url).toString();
-  const category = classifyCategory(title, description, url);
+  const contentHash = SHA256(title + normalizedUrl).toString();
+  // Sports outlets live in their own vocabulary silo (player names, club
+  // shorthand) so the keyword classifier often dumps them into `genel`,
+  // which then pollutes politics clusters. Force-tag them by source slug
+  // so they cluster with each other and stay out of politics.
+  const category: NewsCategory = SPORTS_SOURCE_SLUGS.has(source.slug)
+    ? "spor"
+    : classifyCategory(title, description, normalizedUrl);
 
   return {
     source_id: source.id,
     title,
     description,
-    url,
+    url: normalizedUrl,
     image_url: imageUrl,
     published_at: publishedAt,
     content_hash: contentHash,
     category,
   };
 }
+
+// Sources whose entire output is sports — bypass keyword classification
+// and tag every article `spor` so they cluster together and don't
+// accidentally land in politics clusters via stray keywords.
+const SPORTS_SOURCE_SLUGS: ReadonlySet<string> = new Set([
+  "fotomac",
+  "fotospor",
+  "a-spor",
+  "ntv-spor",
+  "kontraspor",
+  "ajansspor",
+]);
 
 // Keyword-based category classification for Turkish news
 const CATEGORY_RULES: { category: NewsCategory; keywords: RegExp }[] = [
@@ -92,8 +125,11 @@ function classifyCategory(
 ): NewsCategory {
   const text = `${title} ${description || ""} ${url}`.toLowerCase();
 
-  // Son dakika gets priority
-  if (CATEGORY_RULES[0].keywords.test(text)) return "son_dakika";
+  // Son dakika gets priority. The first rule is statically defined above so
+  // it will always exist; the optional-chain keeps the type checker happy
+  // under `noUncheckedIndexedAccess` without changing runtime semantics.
+  const sonDakikaRule = CATEGORY_RULES[0];
+  if (sonDakikaRule && sonDakikaRule.keywords.test(text)) return "son_dakika";
 
   // Check URL path for category hints
   const urlCategory = detectCategoryFromUrl(url);
@@ -167,9 +203,29 @@ function isValidImageUrl(url: string): boolean {
   return true;
 }
 
+// Decode XML/HTML named entities that survive rss-parser's own decode pass.
+// Some Turkish feeds (haberler.com especially) double-encode: raw feed has
+// `&amp;apos;`, rss-parser decodes `&amp;` → `&`, leaving a literal `&apos;`
+// in the title that React renders as text. Second pass here catches it.
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&#34;/g, '"')
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) =>
+      String.fromCodePoint(parseInt(n, 16))
+    );
+}
+
 function cleanDescription(raw?: string): string | null {
   if (!raw) return null;
-  const text = raw.replace(/<[^>]*>/g, "").trim();
+  const text = decodeEntities(raw.replace(/<[^>]*>/g, "")).trim();
   return text.length > 500 ? text.slice(0, 497) + "..." : text || null;
 }
 

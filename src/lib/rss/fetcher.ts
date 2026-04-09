@@ -60,12 +60,28 @@ export async function fetchAllFeeds(
     sources.map((source) => fetchSingleFeed(source))
   );
 
-  return results.map((result, i) => {
+  return results.map((result, i): FetchResult => {
     if (result.status === "fulfilled") return result.value;
+    // `i` is always within bounds since `results.length === sources.length`,
+    // but `noUncheckedIndexedAccess` doesn't know that. Fall back to a stub
+    // source if the index ever drifts so we still return a typed FetchResult.
+    const source = sources[i] ?? {
+      id: "",
+      name: "unknown",
+      slug: "unknown",
+      url: "",
+      rss_url: "",
+      bias: "center" as const,
+      logo_url: null,
+      active: false,
+    };
     return {
-      source: sources[i],
+      source,
       items: [],
-      error: (result.reason as Error).message,
+      error:
+        result.reason instanceof Error
+          ? result.reason.message
+          : String(result.reason),
     };
   });
 }
