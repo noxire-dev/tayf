@@ -1,35 +1,45 @@
-import type { AlignmentCategory, AlignmentDistribution } from "@/types";
+import type { BiasCategory, BiasDistribution } from "@/types";
 
-export function calculateAlignmentDistribution(
-  alignments: AlignmentCategory[]
-): AlignmentDistribution {
-  const distribution: AlignmentDistribution = {
-    pro_government: 0,
-    gov_leaning: 0,
-    center: 0,
-    opposition_leaning: 0,
-    opposition: 0,
-  };
+const EMPTY_DISTRIBUTION: BiasDistribution = {
+  pro_government: 0,
+  gov_leaning: 0,
+  state_media: 0,
+  center: 0,
+  opposition_leaning: 0,
+  opposition: 0,
+  nationalist: 0,
+  islamist_conservative: 0,
+  pro_kurdish: 0,
+  international: 0,
+};
 
-  for (const alignment of alignments) {
-    distribution[alignment]++;
+export function emptyBiasDistribution(): BiasDistribution {
+  return { ...EMPTY_DISTRIBUTION };
+}
+
+export function calculateBiasDistribution(
+  biasLabels: BiasCategory[]
+): BiasDistribution {
+  const distribution = emptyBiasDistribution();
+  for (const bias of biasLabels) {
+    distribution[bias]++;
   }
-
   return distribution;
 }
 
-export function detectBlindspot(distribution: AlignmentDistribution): {
+export function detectBlindspot(distribution: BiasDistribution): {
   isBlindspot: boolean;
-  blindspotSide: AlignmentCategory | null;
+  blindspotSide: BiasCategory | null;
 } {
-  const categories = Object.entries(distribution) as [AlignmentCategory, number][];
+  const categories = Object.entries(distribution) as [BiasCategory, number][];
   const nonZero = categories.filter(([, count]) => count > 0);
 
-  // Blindspot = only one alignment category covers this story
-  if (nonZero.length === 1) {
+  // Blindspot = only one bias category covers this story
+  const sole = nonZero.length === 1 ? nonZero[0] : null;
+  if (sole) {
     return {
       isBlindspot: true,
-      blindspotSide: nonZero[0][0],
+      blindspotSide: sole[0],
     };
   }
 
