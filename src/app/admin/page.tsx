@@ -1,65 +1,18 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { StatsGrid } from "@/components/admin/stats-grid";
+import { WorkerStats } from "@/components/admin/worker-stats";
+import { QuickActionsCard } from "@/components/admin/quick-actions-card";
+import { SourceRow, type SourceItem } from "@/components/admin/source-row";
+import { SourceDialog } from "@/components/admin/source-dialog";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
-import { Separator } from "@/components/ui/separator";
-import {
-  Newspaper,
-  Building2,
-  Layers,
-  ImageOff,
-  RefreshCw,
-  Trash2,
-  Image,
-  Loader2,
-  CheckCircle,
-  XCircle,
-  AlertTriangle,
-  Plus,
-  Pencil,
-  ExternalLink,
-  Filter,
-} from "lucide-react";
-import {
-  ALIGNMENT_META,
-  TRADITION_META,
-  SOURCE_TYPE_META,
-} from "@/types";
-import type {
-  AlignmentCategory,
-  TraditionCategory,
-  SourceType,
-} from "@/types";
-
-interface SourceItem {
-  id: string;
-  name: string;
-  slug: string;
-  url: string;
-  rss_url: string;
-  alignment: AlignmentCategory;
-  tradition: TraditionCategory;
-  source_type: SourceType;
-  active: boolean;
-}
+  ActionResultBanner,
+  type ActionResult,
+} from "@/components/admin/action-result-banner";
+import { RefreshCw, Loader2, Plus } from "lucide-react";
 
 interface Stats {
   articles: number;
@@ -69,39 +22,14 @@ interface Stats {
   sourcesList: SourceItem[];
 }
 
-type ActionResult = {
-  success?: boolean;
-  error?: string;
-  message?: string;
-  [key: string]: unknown;
-};
-
 const EMPTY_SOURCE: SourceItem = {
   id: "",
   name: "",
   slug: "",
   url: "",
   rss_url: "",
-  alignment: "center",
-  tradition: "mainstream",
-  source_type: "general",
+  bias: "center",
   active: true,
-};
-
-const ALIGNMENT_STYLES: Record<AlignmentCategory, string> = {
-  pro_government: "bg-red-600/15 text-red-400 border-red-600/20",
-  gov_leaning: "bg-red-400/15 text-red-300 border-red-400/20",
-  center: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20",
-  opposition_leaning: "bg-blue-400/15 text-blue-300 border-blue-400/20",
-  opposition: "bg-blue-600/15 text-blue-400 border-blue-600/20",
-};
-
-const ALIGNMENT_DOTS: Record<AlignmentCategory, string> = {
-  pro_government: "bg-red-600",
-  gov_leaning: "bg-red-400",
-  center: "bg-emerald-500",
-  opposition_leaning: "bg-blue-400",
-  opposition: "bg-blue-600",
 };
 
 export default function AdminPage() {
@@ -109,11 +37,6 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<ActionResult | null>(null);
-
-  // Filters
-  const [filterType, setFilterType] = useState<SourceType | "all">("all");
-  const [filterAlignment, setFilterAlignment] = useState<AlignmentCategory | "all">("all");
-  const [searchQuery, setSearchQuery] = useState("");
 
   // Source dialog state
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -136,16 +59,6 @@ export default function AdminPage() {
     fetchStats();
   }, [fetchStats]);
 
-  const filteredSources = useMemo(() => {
-    if (!stats?.sourcesList) return [];
-    return stats.sourcesList.filter((s) => {
-      if (filterType !== "all" && s.source_type !== filterType) return false;
-      if (filterAlignment !== "all" && s.alignment !== filterAlignment) return false;
-      if (searchQuery && !s.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
-      return true;
-    });
-  }, [stats?.sourcesList, filterType, filterAlignment, searchQuery]);
-
   async function runAction(
     action: string,
     extraBody?: Record<string, unknown>
@@ -161,8 +74,10 @@ export default function AdminPage() {
       const data = await res.json();
       setLastResult(data);
       await fetchStats();
-    } catch (e) {
-      setLastResult({ error: (e as Error).message });
+    } catch (e: unknown) {
+      setLastResult({
+        error: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       setActionLoading(null);
     }
@@ -191,6 +106,7 @@ export default function AdminPage() {
     setActionLoading("save_source");
     setLastResult(null);
 
+    // Auto-generate slug from name if empty
     const slug =
       editSource.slug ||
       editSource.name
@@ -208,11 +124,7 @@ export default function AdminPage() {
       const res = await fetch("/api/admin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action,
-          ...editSource,
-          slug,
-        }),
+        body: JSON.stringify({ action, ...editSource, slug }),
       });
       const data = await res.json();
       setLastResult(data);
@@ -220,8 +132,10 @@ export default function AdminPage() {
         setDialogOpen(false);
         await fetchStats();
       }
-    } catch (e) {
-      setLastResult({ error: (e as Error).message });
+    } catch (e: unknown) {
+      setLastResult({
+        error: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       setActionLoading(null);
     }
@@ -235,6 +149,10 @@ export default function AdminPage() {
     ) {
       runAction("delete_source", { id: source.id });
     }
+  }
+
+  function handleToggleSource(source: SourceItem) {
+    runAction("toggle_source", { slug: source.slug, active: !source.active });
   }
 
   if (loading) {
@@ -265,466 +183,61 @@ export default function AdminPage() {
         </Button>
       </div>
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        <StatCard icon={Newspaper} label="Haberler" value={stats?.articles ?? 0} />
-        <StatCard icon={Building2} label="Kaynaklar" value={stats?.sources ?? 0} />
-        <StatCard icon={Layers} label="Kümeler" value={stats?.clusters ?? 0} />
-        <StatCard
-          icon={ImageOff}
-          label="Görselsiz"
-          value={stats?.missingImages ?? 0}
-          variant={stats?.missingImages ? "warning" : "default"}
-        />
+      <div className="mb-4">
+        <WorkerStats />
       </div>
 
-      {/* Action Result */}
-      {lastResult && (
-        <div
-          className={`mb-4 rounded-lg border p-3 text-sm ${
-            lastResult.error
-              ? "border-red-500/30 bg-red-500/10 text-red-400"
-              : "border-green-500/30 bg-green-500/10 text-green-400"
-          }`}
-        >
-          <div className="flex items-start gap-2">
-            {lastResult.error ? (
-              <XCircle className="h-4 w-4 mt-0.5 shrink-0" />
-            ) : (
-              <CheckCircle className="h-4 w-4 mt-0.5 shrink-0" />
-            )}
-            <pre className="text-xs whitespace-pre-wrap font-mono">
-              {JSON.stringify(lastResult, null, 2)}
-            </pre>
-          </div>
-        </div>
-      )}
+      <StatsGrid
+        articles={stats?.articles ?? 0}
+        sources={stats?.sources ?? 0}
+        clusters={stats?.clusters ?? 0}
+        missingImages={stats?.missingImages ?? 0}
+      />
 
-      {/* Quick Actions */}
-      <Card className="mb-6">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm">Hızlı İşlemler</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <ActionRow
-            icon={RefreshCw}
-            title="RSS Beslemelerini Çek"
-            description="Tüm aktif kaynaklardan haberleri çeker ve veritabanına kaydeder"
-            buttonLabel="Çek"
-            buttonVariant="default"
-            loading={actionLoading === "ingest"}
-            onClick={() => runAction("ingest")}
-          />
-          <Separator />
-          <ActionRow
-            icon={Image}
-            title="Görselleri Tamamla"
-            description={`Görseli olmayan ${stats?.missingImages ?? 0} haber için og:image çeker`}
-            buttonLabel="Tamamla"
-            buttonVariant="default"
-            loading={actionLoading === "backfill_images"}
-            onClick={() => runAction("backfill_images")}
-          />
-          <Separator />
-          <ActionRow
-            icon={Trash2}
-            title="Kümeleri Sil"
-            description="Tüm haber kümelerini siler, haberler korunur"
-            buttonLabel="Kümeleri Sil"
-            buttonVariant="destructive"
-            loading={actionLoading === "nuke_clusters"}
-            onClick={() => confirmAndRun("nuke_clusters", "Tüm kümeler silinecek.")}
-          />
-          <Separator />
-          <ActionRow
-            icon={AlertTriangle}
-            title="Tüm Haberleri Sil"
-            description="Tüm haberleri ve kümeleri siler. Kaynaklar korunur."
-            buttonLabel="Hepsini Sil"
-            buttonVariant="destructive"
-            loading={actionLoading === "nuke_articles"}
-            onClick={() =>
-              confirmAndRun("nuke_articles", "TÜM haberler ve kümeler silinecek!")
-            }
-          />
-        </CardContent>
-      </Card>
+      {lastResult && <ActionResultBanner result={lastResult} />}
 
-      {/* Sources Management */}
+      <QuickActionsCard
+        missingImages={stats?.missingImages ?? 0}
+        actionLoading={actionLoading}
+        onRun={runAction}
+        onConfirmAndRun={confirmAndRun}
+      />
+
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-sm">
-              Kaynaklar
-              <span className="text-muted-foreground font-normal ml-2">
-                {filteredSources.length} / {stats?.sourcesList.length ?? 0}
-              </span>
-            </CardTitle>
+            <CardTitle className="text-sm">Kaynaklar</CardTitle>
             <Button size="sm" className="text-xs h-7" onClick={openAddDialog}>
               <Plus className="h-3 w-3 mr-1" />
               Kaynak Ekle
             </Button>
           </div>
-
-          {/* Filters */}
-          <div className="flex flex-wrap items-center gap-2 mt-3">
-            <Filter className="h-3.5 w-3.5 text-muted-foreground" />
-            <Input
-              placeholder="Kaynak ara..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="h-7 text-xs w-40"
-            />
-            <Select
-              value={filterType}
-              onValueChange={(v) => setFilterType(v as SourceType | "all")}
-            >
-              <SelectTrigger className="h-7 text-xs w-28">
-                <SelectValue placeholder="Tür" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Tüm Türler</SelectItem>
-                {(Object.keys(SOURCE_TYPE_META) as SourceType[]).map((t) => (
-                  <SelectItem key={t} value={t}>{SOURCE_TYPE_META[t].label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={filterAlignment}
-              onValueChange={(v) => setFilterAlignment(v as AlignmentCategory | "all")}
-            >
-              <SelectTrigger className="h-7 text-xs w-36">
-                <SelectValue placeholder="Konum" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Tüm Konumlar</SelectItem>
-                {(Object.keys(ALIGNMENT_META) as AlignmentCategory[]).map((a) => (
-                  <SelectItem key={a} value={a}>
-                    <span className="flex items-center gap-2">
-                      <span className={`h-2 w-2 rounded-full ${ALIGNMENT_DOTS[a]}`} />
-                      {ALIGNMENT_META[a].label}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
         </CardHeader>
         <CardContent>
           <div className="space-y-1">
-            {filteredSources.map((source) => (
-              <div
+            {stats?.sourcesList.map((source) => (
+              <SourceRow
                 key={source.id}
-                className={`flex items-center justify-between rounded-lg px-3 py-2.5 transition-colors ${
-                  source.active ? "hover:bg-muted/50" : "opacity-50 bg-muted/20"
-                }`}
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-medium">{source.name}</span>
-                      <Badge
-                        variant="outline"
-                        className={`text-[10px] ${ALIGNMENT_STYLES[source.alignment]}`}
-                      >
-                        {ALIGNMENT_META[source.alignment].label}
-                      </Badge>
-                      {source.tradition !== "mainstream" && (
-                        <Badge variant="outline" className="text-[10px] bg-muted/50 text-muted-foreground border-border">
-                          {TRADITION_META[source.tradition].label}
-                        </Badge>
-                      )}
-                      {source.source_type !== "general" && (
-                        <Badge variant="secondary" className="text-[10px]">
-                          {SOURCE_TYPE_META[source.source_type].label}
-                        </Badge>
-                      )}
-                      {!source.active && (
-                        <Badge variant="secondary" className="text-[10px]">
-                          Devre Dışı
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-[10px] text-muted-foreground truncate max-w-[200px]">
-                        {source.rss_url}
-                      </span>
-                      <a
-                        href={source.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-muted-foreground/50 hover:text-muted-foreground"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <ExternalLink className="h-2.5 w-2.5" />
-                      </a>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-1 shrink-0">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 w-7 p-0"
-                    onClick={() => openEditDialog(source)}
-                  >
-                    <Pencil className="h-3 w-3" />
-                  </Button>
-                  <Button
-                    variant={source.active ? "outline" : "secondary"}
-                    size="sm"
-                    className="text-[11px] h-7 px-2"
-                    disabled={actionLoading === `toggle_${source.slug}`}
-                    onClick={() =>
-                      runAction("toggle_source", {
-                        slug: source.slug,
-                        active: !source.active,
-                      })
-                    }
-                  >
-                    {source.active ? "Devre Dışı Bırak" : "Aktifleştir"}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 w-7 p-0 text-destructive/60 hover:text-destructive"
-                    onClick={() => handleDeleteSource(source)}
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </div>
-              </div>
+                source={source}
+                actionLoading={actionLoading}
+                onEdit={openEditDialog}
+                onToggle={handleToggleSource}
+                onDelete={handleDeleteSource}
+              />
             ))}
           </div>
         </CardContent>
       </Card>
 
-      {/* Add/Edit Source Dialog */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="text-base">
-              {dialogMode === "add" ? "Yeni Kaynak Ekle" : "Kaynağı Düzenle"}
-            </DialogTitle>
-          </DialogHeader>
-
-          <div className="space-y-3 py-2">
-            <div className="space-y-1.5">
-              <Label className="text-xs">Kaynak Adı</Label>
-              <Input
-                placeholder="Örn: Hürriyet"
-                value={editSource.name}
-                onChange={(e) =>
-                  setEditSource({ ...editSource, name: e.target.value })
-                }
-                className="h-8 text-sm"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label className="text-xs">Slug (otomatik oluşturulur)</Label>
-              <Input
-                placeholder="Örn: hurriyet"
-                value={editSource.slug}
-                onChange={(e) =>
-                  setEditSource({ ...editSource, slug: e.target.value })
-                }
-                className="h-8 text-sm font-mono"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label className="text-xs">Web Sitesi URL</Label>
-              <Input
-                placeholder="https://www.hurriyet.com.tr"
-                value={editSource.url}
-                onChange={(e) =>
-                  setEditSource({ ...editSource, url: e.target.value })
-                }
-                className="h-8 text-sm"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label className="text-xs">RSS Feed URL</Label>
-              <Input
-                placeholder="https://www.hurriyet.com.tr/rss/anasayfa"
-                value={editSource.rss_url}
-                onChange={(e) =>
-                  setEditSource({ ...editSource, rss_url: e.target.value })
-                }
-                className="h-8 text-sm"
-              />
-            </div>
-
-            <div className="grid grid-cols-3 gap-2">
-              <div className="space-y-1.5">
-                <Label className="text-xs">Konum</Label>
-                <Select
-                  value={editSource.alignment}
-                  onValueChange={(value) =>
-                    value && setEditSource({ ...editSource, alignment: value as AlignmentCategory })
-                  }
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(Object.keys(ALIGNMENT_META) as AlignmentCategory[]).map((a) => (
-                      <SelectItem key={a} value={a}>
-                        <span className="flex items-center gap-2">
-                          <span className={`h-2 w-2 rounded-full ${ALIGNMENT_DOTS[a]}`} />
-                          {ALIGNMENT_META[a].label}
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label className="text-xs">Gelenek</Label>
-                <Select
-                  value={editSource.tradition}
-                  onValueChange={(value) =>
-                    value && setEditSource({ ...editSource, tradition: value as TraditionCategory })
-                  }
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(Object.keys(TRADITION_META) as TraditionCategory[]).map((t) => (
-                      <SelectItem key={t} value={t}>{TRADITION_META[t].label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label className="text-xs">Tür</Label>
-                <Select
-                  value={editSource.source_type}
-                  onValueChange={(value) =>
-                    value && setEditSource({ ...editSource, source_type: value as SourceType })
-                  }
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(Object.keys(SOURCE_TYPE_META) as SourceType[]).map((t) => (
-                      <SelectItem key={t} value={t}>{SOURCE_TYPE_META[t].label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-          </div>
-
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-xs"
-              onClick={() => setDialogOpen(false)}
-            >
-              İptal
-            </Button>
-            <Button
-              size="sm"
-              className="text-xs"
-              disabled={
-                !editSource.name ||
-                !editSource.url ||
-                !editSource.rss_url ||
-                actionLoading === "save_source"
-              }
-              onClick={handleSaveSource}
-            >
-              {actionLoading === "save_source" && (
-                <Loader2 className="h-3 w-3 animate-spin mr-1.5" />
-              )}
-              {dialogMode === "add" ? "Ekle" : "Kaydet"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}
-
-function StatCard({
-  icon: Icon,
-  label,
-  value,
-  variant = "default",
-}: {
-  icon: React.ElementType;
-  label: string;
-  value: number;
-  variant?: "default" | "warning";
-}) {
-  return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="flex items-center gap-3">
-          <div
-            className={`rounded-md p-2 ${
-              variant === "warning"
-                ? "bg-amber-500/15 text-amber-500"
-                : "bg-muted text-muted-foreground"
-            }`}
-          >
-            <Icon className="h-4 w-4" />
-          </div>
-          <div>
-            <p className="text-2xl font-bold tabular-nums">{value}</p>
-            <p className="text-[11px] text-muted-foreground">{label}</p>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function ActionRow({
-  icon: Icon,
-  title,
-  description,
-  buttonLabel,
-  buttonVariant,
-  loading,
-  onClick,
-}: {
-  icon: React.ElementType;
-  title: string;
-  description: string;
-  buttonLabel: string;
-  buttonVariant: "default" | "destructive";
-  loading: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4">
-      <div className="flex items-start gap-3 min-w-0">
-        <Icon className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
-        <div className="min-w-0">
-          <p className="text-sm font-medium">{title}</p>
-          <p className="text-xs text-muted-foreground">{description}</p>
-        </div>
-      </div>
-      <Button
-        variant={buttonVariant}
-        size="sm"
-        className="text-xs shrink-0"
-        disabled={loading}
-        onClick={onClick}
-      >
-        {loading ? <Loader2 className="h-3 w-3 animate-spin mr-1.5" /> : null}
-        {buttonLabel}
-      </Button>
+      <SourceDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        mode={dialogMode}
+        source={editSource}
+        onChange={setEditSource}
+        onSave={handleSaveSource}
+        saving={actionLoading === "save_source"}
+      />
     </div>
   );
 }
