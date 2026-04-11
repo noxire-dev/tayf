@@ -183,20 +183,20 @@ export default async function SourceProfilePage({ params }: PageProps) {
             <img
               src={source.logo_url}
               alt=""
-              className="h-16 w-16 sm:h-20 sm:w-20 rounded-lg shrink-0 object-contain bg-background ring-1 ring-border/60"
+              className="h-16 w-16 sm:h-20 sm:w-20 rounded-lg shrink-0 object-contain bg-background ring-1 ring-brand/20"
               loading="eager"
             />
           ) : (
-            <div className="h-16 w-16 sm:h-20 sm:w-20 rounded-lg shrink-0 bg-muted/60 ring-1 ring-border/60" />
+            <div className="h-16 w-16 sm:h-20 sm:w-20 rounded-lg shrink-0 bg-muted/60 ring-1 ring-brand/20" />
           )}
 
           <div className="min-w-0 flex-1 space-y-2">
-            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight leading-tight truncate">
+            <h1 className="font-serif text-2xl sm:text-3xl font-bold tracking-tight leading-tight truncate">
               {source.name}
             </h1>
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-3">
               <BiasBadge bias={source.bias} />
-              <span className="text-[11px] text-muted-foreground">
+              <span className="font-mono text-[11px] text-brand">
                 son 7 günde {articleCount7d} haber
               </span>
             </div>
@@ -204,7 +204,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
               href={source.url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors brand-underline"
             >
               {new URL(source.url).hostname.replace(/^www\./, "")}
               <ExternalLink className="h-3 w-3" />
@@ -217,7 +217,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
           state covers brand-new sources or temporarily inactive feeds. */}
       <section className="space-y-3">
         <div className="flex items-baseline justify-between">
-          <h2 className="text-lg font-semibold tracking-tight">
+          <h2 className="font-serif text-lg font-semibold tracking-tight">
             Son haberler
           </h2>
           <span className="text-[11px] text-muted-foreground">
@@ -231,10 +231,10 @@ export default async function SourceProfilePage({ params }: PageProps) {
           </p>
         ) : (
           <ul className="space-y-2">
-            {articles.map((article) => (
+            {articles.map((article, i) => (
               <li
                 key={article.id}
-                className="rounded-lg ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 transition-all"
+                className={`animate-fade-up stagger-${Math.min(i + 1, 8)} rounded-lg ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 transition-all hover-lift`}
               >
                 <a
                   href={article.url}
@@ -262,7 +262,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
                         {article.description}
                       </p>
                     ) : null}
-                    <p className="text-[10px] text-muted-foreground/70">
+                    <p className="font-mono text-[10px] text-muted-foreground/70">
                       {formatTurkishTimeAgo(article.published_at)}
                     </p>
                   </div>
