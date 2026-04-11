@@ -127,11 +127,13 @@ export default async function TimelinePage() {
           Son 24 saatte yeni küme oluşturulmadı.
         </p>
       ) : (
-        <div className="space-y-8">
+        <div className="space-y-8 border-l-2 border-brand/20 pl-6 ml-2 relative">
           {buckets.map((bucket) => (
-            <section key={bucket.hourISO} className="space-y-3">
+            <section key={bucket.hourISO} className="space-y-3 relative">
+              {/* Timeline dot marker */}
+              <div className="absolute -left-[calc(1.5rem+5px)] top-1 h-2.5 w-2.5 rounded-full bg-brand/60 ring-2 ring-background" />
               <div className="flex items-baseline justify-between border-b border-border/60 pb-2">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                <h2 className="text-sm font-mono text-brand font-semibold uppercase tracking-[0.12em]">
                   {formatHourLabel(bucket.hourISO)}
                 </h2>
                 <span className="text-[11px] text-muted-foreground/70">
@@ -139,10 +141,10 @@ export default async function TimelinePage() {
                 </span>
               </div>
               <ul className="space-y-2">
-                {bucket.rows.map((row) => (
+                {bucket.rows.map((row, rowIdx) => (
                   <li
                     key={row.id}
-                    className="flex items-baseline gap-3 rounded-lg ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 px-3 py-2 transition-all"
+                    className={`flex items-baseline gap-3 rounded-lg ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 px-3 py-2 transition-all animate-fade-up stagger-${rowIdx < 6 ? rowIdx + 1 : 6}`}
                   >
                     <time
                       dateTime={row.first_published}

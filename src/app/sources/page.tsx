@@ -154,7 +154,7 @@ export default async function SourcesPage() {
         return (
           <section key={bias} className="space-y-3">
             <div className="flex items-baseline justify-between">
-              <h2 className="text-lg font-semibold tracking-tight">
+              <h2 className="text-lg font-serif font-semibold tracking-tight">
                 {BIAS_LABELS[bias]}
               </h2>
               <span className="text-[11px] text-muted-foreground">
@@ -163,10 +163,10 @@ export default async function SourcesPage() {
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-              {bucket.map((source) => (
+              {bucket.map((source, srcIdx) => (
                 <div
                   key={source.id}
-                  className="group relative rounded-xl ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 p-4 transition-all"
+                  className={`group relative rounded-xl ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 p-4 transition-all hover-lift animate-fade-up stagger-${srcIdx < 6 ? srcIdx + 1 : 6}`}
                 >
                   <Link
                     href={`/source/${source.slug}`}
@@ -179,19 +179,19 @@ export default async function SourcesPage() {
                         <img
                           src={source.logo_url}
                           alt=""
-                          className="h-8 w-8 rounded shrink-0 object-contain bg-background"
+                          className="h-8 w-8 rounded shrink-0 object-contain bg-background ring-1 ring-border/30"
                           loading="lazy"
                         />
                       ) : (
-                        <div className="h-8 w-8 rounded shrink-0 bg-muted/60" />
+                        <div className="h-8 w-8 rounded shrink-0 bg-muted/60 ring-1 ring-border/30" />
                       )}
                       <div className="min-w-0 flex-1 space-y-1">
-                        <p className="text-sm font-semibold truncate group-hover:text-foreground pr-5">
+                        <p className="text-sm font-sans font-semibold truncate group-hover:text-foreground pr-5">
                           {source.name}
                         </p>
                         <BiasBadge bias={source.bias} size="sm" />
-                        <p className="text-[11px] text-muted-foreground">
-                          {source.articleCount7d} haber · son 7 günde
+                        <p className="text-muted-foreground">
+                          <span className="font-mono text-[10px]">son 7 günde {source.articleCount7d} haber</span>
                         </p>
                         {source.lastPublishedAt ? (
                           <p className="text-[10px] text-muted-foreground/70">

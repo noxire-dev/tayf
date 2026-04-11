@@ -391,13 +391,21 @@ export default async function BlindspotsPage() {
           {bundles.map((b, i) => {
             const hoursAgo =
               (nowMs - new Date(b.cluster.updated_at).getTime()) / 3_600_000;
+            const prevZone = i > 0 ? bundles[i - 1]?.dominantZone ?? null : null;
+            const showDivider = i > 0 && b.dominantZone !== prevZone;
             return (
-              <BlindspotCard
-                key={b.cluster.id}
-                bundle={b}
-                index={i}
-                isAging={hoursAgo > 48}
-              />
+              <div key={b.cluster.id}>
+                {showDivider && (
+                  <div className="h-px bg-gradient-to-r from-transparent via-border/30 to-transparent my-6" />
+                )}
+                <div className={`animate-fade-up stagger-${i < 6 ? i + 1 : 6}`}>
+                  <BlindspotCard
+                    bundle={b}
+                    index={i}
+                    isAging={hoursAgo > 48}
+                  />
+                </div>
+              </div>
             );
           })}
         </div>
@@ -428,13 +436,13 @@ function BlindspotCard({ bundle, index, isAging }: BlindspotCardProps) {
       <div className="flex items-center justify-between gap-2 px-1">
         <div className="flex items-center gap-2">
           <span
-            className={`inline-flex items-center gap-1.5 rounded-full ${meta.chipBg} ${meta.chipBorder} border px-2.5 py-1 text-[11px] font-semibold ${meta.chipText}`}
+            className={`inline-flex items-center gap-1.5 rounded-full ${meta.chipBg} ${meta.chipBorder} border px-2.5 py-1 text-[11px] font-serif font-semibold ${meta.chipText}`}
           >
             <Eye className="h-3 w-3" aria-hidden="true" />
             Sadece {meta.label} yazdı
           </span>
           <span className="text-[11px] text-muted-foreground">
-            {pctLabel} tek tarafta
+            <span className="font-mono">{pctLabel}</span> tek tarafta
           </span>
         </div>
       </div>

@@ -192,7 +192,7 @@ export default async function TrendsPage() {
       <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-6 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="text-xs text-muted-foreground">
-            Toplam {totalArticles.toLocaleString("tr-TR")} haber, son{" "}
+            Toplam <span className="font-mono">{totalArticles.toLocaleString("tr-TR")}</span> haber, son{" "}
             {WINDOW_DAYS} gün
           </div>
           <ul className="flex flex-wrap items-center gap-3">
@@ -201,7 +201,7 @@ export default async function TrendsPage() {
               return (
                 <li
                   key={z}
-                  className="flex items-center gap-1.5 text-[11px] text-muted-foreground"
+                  className="flex items-center gap-1.5 font-mono text-[10px] uppercase text-muted-foreground"
                 >
                   <span
                     className={`inline-block h-2.5 w-2.5 rounded-sm ${meta.dot}`}
@@ -214,7 +214,7 @@ export default async function TrendsPage() {
           </ul>
         </div>
 
-        <div className="w-full overflow-x-auto">
+        <div className="w-full overflow-x-auto spectrum-glow">
           <svg
             viewBox={`0 0 ${CHART_W} ${CHART_H}`}
             role="img"
@@ -303,6 +303,7 @@ export default async function TrendsPage() {
               className="text-muted-foreground"
               fill="currentColor"
               fontSize={10}
+              fontFamily="var(--font-mono, ui-monospace, monospace)"
             >
               {buckets.map((bucket, idx) => {
                 if (idx % 5 !== 0 && idx !== buckets.length - 1) return null;
