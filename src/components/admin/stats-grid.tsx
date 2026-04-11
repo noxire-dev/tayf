@@ -1,6 +1,13 @@
 import { StatCard } from "./stat-card";
 import { Newspaper, Building2, Layers, ImageOff } from "lucide-react";
 
+const items = [
+  { icon: Newspaper, label: "Haberler", key: "articles" as const },
+  { icon: Building2, label: "Kaynaklar", key: "sources" as const },
+  { icon: Layers, label: "Kümeler", key: "clusters" as const },
+  { icon: ImageOff, label: "Görselsiz", key: "missingImages" as const },
+] as const;
+
 export function StatsGrid({
   articles,
   sources,
@@ -12,17 +19,20 @@ export function StatsGrid({
   clusters: number;
   missingImages: number;
 }) {
+  const values = { articles, sources, clusters, missingImages };
+
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-      <StatCard icon={Newspaper} label="Haberler" value={articles} />
-      <StatCard icon={Building2} label="Kaynaklar" value={sources} />
-      <StatCard icon={Layers} label="Kümeler" value={clusters} />
-      <StatCard
-        icon={ImageOff}
-        label="Görselsiz"
-        value={missingImages}
-        variant={missingImages ? "warning" : "default"}
-      />
+      {items.map((item, i) => (
+        <div key={item.key} className={`stagger-${i + 1}`}>
+          <StatCard
+            icon={item.icon}
+            label={item.label}
+            value={values[item.key]}
+            variant={item.key === "missingImages" && values[item.key] ? "warning" : "default"}
+          />
+        </div>
+      ))}
     </div>
   );
 }

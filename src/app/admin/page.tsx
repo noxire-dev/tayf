@@ -164,10 +164,10 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="container mx-auto px-4 py-6 max-w-4xl">
+    <div className="container mx-auto px-4 sm:px-6 py-8 max-w-6xl">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-xl font-bold">Admin Panel</h1>
+          <h1 className="text-xl font-bold font-serif">Admin Panel</h1>
           <p className="text-xs text-muted-foreground mt-0.5">
             Dev tools for testing and managing Tayf
           </p>
@@ -206,7 +206,7 @@ export default function AdminPage() {
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-sm">Kaynaklar</CardTitle>
+            <CardTitle className="text-sm font-serif">Kaynaklar</CardTitle>
             <Button size="sm" className="text-xs h-7" onClick={openAddDialog}>
               <Plus className="h-3 w-3 mr-1" />
               Kaynak Ekle

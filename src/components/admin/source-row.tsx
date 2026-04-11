@@ -28,17 +28,17 @@ export function SourceRow({
 }) {
   return (
     <div
-      className={`flex items-center justify-between rounded-lg px-3 py-2.5 transition-colors ${
+      className={`flex items-center justify-between rounded-lg px-3 py-2.5 transition-colors hover-lift ${
         source.active ? "hover:bg-muted/50" : "opacity-50 bg-muted/20"
       }`}
     >
       <div className="flex items-center gap-2.5 min-w-0">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium">{source.name}</span>
+            <span className="text-sm font-sans font-semibold">{source.name}</span>
             <Badge
               variant="outline"
-              className={`text-[10px] ${biasColor(source.bias)}`}
+              className={`font-mono text-[10px] ${biasColor(source.bias)}`}
             >
               {biasLabel(source.bias)}
             </Badge>
@@ -81,7 +81,11 @@ export function SourceRow({
           disabled={actionLoading === `toggle_${source.slug}`}
           onClick={() => onToggle(source)}
         >
-          {source.active ? "Devre Dışı Bırak" : "Aktifleştir"}
+          {source.active ? (
+            <span className="text-brand">Devre Dışı Bırak</span>
+          ) : (
+            <span className="text-muted-foreground">Aktifleştir</span>
+          )}
         </Button>
         <Button
           variant="ghost"

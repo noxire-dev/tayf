@@ -12,7 +12,7 @@ export function StatCard({
   variant?: "default" | "warning";
 }) {
   return (
-    <Card>
+    <Card className="animate-fade-up hover-lift">
       <CardContent className="p-4">
         <div className="flex items-center gap-3">
           <div
@@ -25,8 +25,8 @@ export function StatCard({
             <Icon className="h-4 w-4" />
           </div>
           <div>
-            <p className="text-2xl font-bold tabular-nums">{value}</p>
-            <p className="text-[11px] text-muted-foreground">{label}</p>
+            <p className="font-mono text-2xl font-semibold text-brand tabular-nums">{value}</p>
+            <p className="font-sans text-[11px] uppercase tracking-wider text-muted-foreground">{label}</p>
           </div>
         </div>
       </CardContent>

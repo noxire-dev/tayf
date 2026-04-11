@@ -22,7 +22,7 @@ export function QuickActionsCard({
   return (
     <Card className="mb-6">
       <CardHeader className="pb-3">
-        <CardTitle className="text-sm">Hızlı İşlemler</CardTitle>
+        <CardTitle className="text-sm font-serif">Hızlı İşlemler</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         <ActionRow

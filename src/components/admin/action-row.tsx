@@ -30,7 +30,7 @@ export function ActionRow({
       <Button
         variant={buttonVariant}
         size="sm"
-        className="text-xs shrink-0"
+        className="text-xs shrink-0 hover:border-brand/40"
         disabled={loading}
         onClick={onClick}
       >
