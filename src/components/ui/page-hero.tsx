@@ -1,16 +1,5 @@
-// Top-of-page hero block used by the main content pages (/stories, /clusters).
-// Pure presentational server component — no state, no hooks, no "use client".
-// Props are intentionally simple strings so every caller passes Turkish copy
-// verbatim and nothing leaks through i18n helpers.
-//
-// W3-U6: editorial polish per R4's ui-audit. The previous hero had "no lift"
-// against the body — same vertical rhythm as a card. Changes:
-//   • bumped vertical spacing (space-y-1.5 → space-y-3 + pb-2)
-//   • kicker now sits in a flex row with a 24px rule, giving it a dateline feel
-//   • h1 grows to lg:text-4xl and tightens to leading-[1.1]
-//   • subtitle gets a max-width and `leading-relaxed` so it reads as a deck
-
-import { Separator } from "./separator";
+// Page hero — editorial masthead for content pages.
+// Uses the serif heading font from the design system for a newspaper feel.
 
 interface PageHeroProps {
   /** Optional small label shown above the title (e.g. "Günün Hikâyeleri"). */
@@ -23,19 +12,16 @@ interface PageHeroProps {
 
 export function PageHero({ kicker, title, subtitle }: PageHeroProps) {
   return (
-    <header className="space-y-3 pb-2">
+    <header className="space-y-4 pb-4">
       {kicker ? (
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+        <div className="flex items-center gap-3">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-brand">
             {kicker}
           </span>
-          <Separator
-            orientation="horizontal"
-            className="h-px w-6 bg-border/60"
-          />
+          <div className="h-px flex-1 bg-gradient-to-r from-brand/30 to-transparent" />
         </div>
       ) : null}
-      <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold tracking-tight leading-[1.1]">
+      <h1 className="font-serif text-3xl sm:text-4xl lg:text-5xl font-normal tracking-tight leading-[1.08]">
         {title}
       </h1>
       {subtitle ? (

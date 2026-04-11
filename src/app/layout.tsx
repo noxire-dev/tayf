@@ -1,17 +1,32 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { DM_Serif_Display, Plus_Jakarta_Sans, JetBrains_Mono } from "next/font/google";
 import { Header } from "@/components/layout/header";
+import { Footer } from "@/components/layout/footer";
 import { KbdShortcuts } from "@/components/kbd-shortcuts";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
+// Editorial serif for headlines — authoritative, warm character.
+// DM Serif Display has excellent Turkish glyph coverage (İ/ı/ğ/ş/ç/ö/ü).
+const serif = DM_Serif_Display({
+  variable: "--font-serif",
+  subsets: ["latin", "latin-ext"],
+  weight: "400",
+  display: "swap",
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
+// Humanist sans for body — geometric but friendly. Excellent readability
+// at small sizes and full Turkish coverage.
+const sans = Plus_Jakarta_Sans({
+  variable: "--font-sans",
+  subsets: ["latin", "latin-ext"],
+  display: "swap",
+});
+
+// Monospace for data labels and badges.
+const mono = JetBrains_Mono({
+  variable: "--font-mono",
+  subsets: ["latin", "latin-ext"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -81,11 +96,12 @@ export default function RootLayout({
   return (
     <html
       lang="tr"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
+      className={`${serif.variable} ${sans.variable} ${mono.variable} h-full antialiased dark`}
     >
       <body className="min-h-full flex flex-col">
         <Header />
         <main className="flex-1">{children}</main>
+        <Footer />
         <KbdShortcuts />
       </body>
     </html>
