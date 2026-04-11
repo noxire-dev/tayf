@@ -205,7 +205,7 @@ export function ClusterCard({
   return (
     <Link
       href={`/cluster/${cluster.id}`}
-      className={`group block min-h-[44px] touch-manipulation rounded-xl ring-1 ${
+      className={`hover-lift group block min-h-[44px] touch-manipulation rounded-xl ring-1 ${
         cluster.is_blindspot
           ? "ring-amber-500/40 hover:ring-amber-500/60"
           : "ring-border/60 hover:ring-border"
@@ -231,6 +231,7 @@ export function ClusterCard({
             priority={isPriority}
             className="h-full w-full object-cover"
           />
+          <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-card/80 to-transparent" />
         </div>
 
         <div className="p-6 sm:p-5 space-y-4">
@@ -239,7 +240,7 @@ export function ClusterCard({
               {cluster.is_blindspot && (
                 <div className="flex items-center gap-1.5 mb-2">
                   <AlertTriangle
-                    className="h-3.5 w-3.5 text-amber-500"
+                    className="h-3.5 w-3.5 text-amber-500 animate-pulse"
                     strokeWidth={2.5}
                   />
                   <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-500">
@@ -247,7 +248,7 @@ export function ClusterCard({
                   </span>
                 </div>
               )}
-              <h2 className="text-lg sm:text-xl lg:text-2xl font-bold leading-tight tracking-tight text-foreground line-clamp-3">
+              <h2 className="font-serif text-lg sm:text-xl lg:text-2xl font-bold leading-tight tracking-tight text-foreground line-clamp-3">
                 {cluster.title_tr}
               </h2>
               <ClusterMetaBadges
@@ -278,7 +279,9 @@ export function ClusterCard({
             </div>
           </div>
 
-          <BiasSpectrum distribution={cluster.bias_distribution} compact />
+          <div className="spectrum-glow rounded">
+            <BiasSpectrum distribution={cluster.bias_distribution} compact />
+          </div>
 
           {visible.length > 0 && (
             <ul className="space-y-1.5 pt-1">
@@ -303,7 +306,7 @@ export function ClusterCard({
                     </span>
                   )}
                   <span className="block truncate min-w-0">
-                    <span className="text-foreground font-medium text-xs mr-1.5">
+                    <span className="text-foreground font-mono font-medium text-[10px] mr-1.5">
                       {a.source_name}
                     </span>
                     <span className="text-muted-foreground text-xs">
@@ -313,7 +316,7 @@ export function ClusterCard({
                 </li>
               ))}
               {extra > 0 && (
-                <li className="text-[11px] text-muted-foreground/70">
+                <li className="text-[11px] text-brand/60">
                   +{extra} başka kaynak
                 </li>
               )}

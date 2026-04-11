@@ -152,10 +152,11 @@ export default async function HomePage({
         <>
           {bucketsWithClusters.map((bucket) => (
             <section key={bucket.key} className="space-y-3">
-              <div className="flex items-baseline justify-between">
-                <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+              <div className="flex items-center gap-3">
+                <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-muted-foreground">
                   {bucket.label}
                 </h2>
+                <div className="h-px flex-1 bg-gradient-to-r from-brand/30 to-transparent" />
                 <span className="text-[11px] text-muted-foreground">
                   {bucket.count}
                 </span>
@@ -171,14 +172,18 @@ export default async function HomePage({
                     (nowMs - new Date(b.cluster.updated_at).getTime()) /
                     3_600_000;
                   return (
-                    <ClusterCard
+                    <div
                       key={b.cluster.id}
-                      cluster={b.cluster}
-                      articles={b.articles}
-                      sources={b.sources}
-                      index={idx}
-                      isAging={hoursAgo > 48}
-                    />
+                      className={`animate-fade-up stagger-${(idx % 8) + 1}`}
+                    >
+                      <ClusterCard
+                        cluster={b.cluster}
+                        articles={b.articles}
+                        sources={b.sources}
+                        index={idx}
+                        isAging={hoursAgo > 48}
+                      />
+                    </div>
                   );
                 })}
               </div>
@@ -206,7 +211,7 @@ function EmptyClusters() {
       <div className="flex h-14 w-14 items-center justify-center rounded-full bg-muted/60 text-muted-foreground">
         <Newspaper className="h-7 w-7" aria-hidden="true" />
       </div>
-      <p className="text-sm font-medium text-foreground">
+      <p className="font-serif text-sm font-medium text-foreground">
         Henüz gösterilecek bir küme yok
       </p>
       <p className="max-w-md text-xs text-muted-foreground leading-relaxed">
@@ -223,7 +228,7 @@ function EmptySearch({ query }: { query?: string }) {
       <div className="flex h-14 w-14 items-center justify-center rounded-full bg-muted/60 text-muted-foreground">
         <SearchX className="h-7 w-7" aria-hidden="true" />
       </div>
-      <p className="text-sm font-medium text-foreground">
+      <p className="font-serif text-sm font-medium text-foreground">
         Hiç haber bulunamadı
       </p>
       {query ? (
@@ -271,7 +276,7 @@ function Pagination({ currentPage, totalPages, query }: PaginationProps) {
   };
 
   const linkCls =
-    "inline-flex min-h-[44px] touch-manipulation items-center rounded-full border border-border/60 bg-background px-4 text-[12px] font-medium text-foreground transition-colors hover:bg-muted";
+    "inline-flex min-h-[44px] touch-manipulation items-center rounded-full border border-border/60 bg-background px-4 text-[12px] font-medium text-foreground transition-colors hover:bg-muted hover:border-brand/40 hover:text-brand";
 
   return (
     <nav
