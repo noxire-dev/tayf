@@ -214,7 +214,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   Kör nokta
                 </div>
               )}
-              <h1 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight leading-[1.05] text-foreground">
+              <h1 className="font-serif text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight leading-[1.05] text-foreground">
                 {cluster.title_tr}
               </h1>
               <div className="flex flex-wrap items-center gap-2 text-[12px] font-medium text-muted-foreground">
@@ -225,10 +225,12 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               </div>
             </div>
 
-            <BiasSpectrum distribution={biasDistribution} />
+            <div className="spectrum-glow">
+              <BiasSpectrum distribution={biasDistribution} />
+            </div>
 
             {cluster.summary_tr && (
-              <p className="text-sm text-muted-foreground leading-relaxed">
+              <p className="text-sm sm:text-base text-muted-foreground leading-relaxed">
                 {cluster.summary_tr}
               </p>
             )}
@@ -241,16 +243,16 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 instead of colliding with the richer ClusterStance grid. */}
             {uniqueRatedSources.length > 0 && (
               <div className="space-y-1.5">
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/80">
+                <div className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/80">
                   Kaynak künyesi
                 </div>
                 <ul className="flex flex-wrap gap-x-3 gap-y-1.5">
-                  {uniqueRatedSources.map((source) => (
+                  {uniqueRatedSources.map((source, i) => (
                     <li
                       key={source.id}
-                      className="inline-flex items-center gap-1.5"
+                      className={`inline-flex items-center gap-1.5 animate-fade-up stagger-${i}`}
                     >
-                      <span className="text-[11px] font-medium text-foreground/80">
+                      <span className="font-mono text-[10px] uppercase tracking-wider text-foreground/80">
                         {source.name}
                       </span>
                       <SourceChips slug={source.slug} />
@@ -263,27 +265,30 @@ export default async function ClusterDetailPage({ params }: PageProps) {
         </div>
       </section>
 
+      {/* Gradient rule between hero and subsequent sections */}
+      <div className="h-px bg-gradient-to-r from-transparent via-brand/20 to-transparent my-6" />
+
       {/* Cross-spectrum surprise caption — moved above the chips per R4 #8.
           The caption is editorially valuable and was previously buried below
           the 144-source Medya DNA grid. Only renders when there's something
           interesting to say (handled inside the component too). */}
       {surpriseLines.length > 0 && (
         <>
-          {/* A4 polish: subtle hairline separates the hero block from the
-              editorial caption so the section change registers visually. */}
-          <div className="border-t border-border/30 pt-2" />
           <CrossSpectrumCaption lines={surpriseLines} />
+          <div className="h-px bg-gradient-to-r from-transparent via-brand/20 to-transparent my-6" />
         </>
       )}
 
       {/* Chart — Bu Haberde Kim Var? (members grouped by Medya DNA zone) */}
-      <div className="rounded-xl border border-border/60 bg-card/40 p-4">
+      <div className="rounded-xl border border-border/60 bg-card/40 p-4 hover-lift animate-fade-up stagger-1">
         <ClusterStance members={members} />
       </div>
 
+      <div className="h-px bg-gradient-to-r from-transparent via-brand/20 to-transparent my-6" />
+
       {/* Chart — Medya DNA'sı (all 144 sources, this cluster's highlighted).
           Now last in the page order; collapsed-by-default thanks to U4. */}
-      <div className="rounded-xl border border-border/60 bg-card/40 p-4">
+      <div className="rounded-xl border border-border/60 bg-card/40 p-4 hover-lift animate-fade-up stagger-2">
         <MediaDna sources={allSources} highlightSlugs={highlightSlugs} />
       </div>
       </div>
