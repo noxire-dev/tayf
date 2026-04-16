@@ -11,7 +11,7 @@
 //   idx.finalize(); // computes idf
 //   idx.cosine("a", "b"); // → 0..1
 
-import { normalizeTurkish } from "./fingerprint.mjs";
+import { normalizeTurkish, stemTurkish } from "./fingerprint.mjs";
 
 export class TfidfIndex {
   constructor() {
@@ -41,7 +41,11 @@ export class TfidfIndex {
       this.docs.set(id, new Map());
       return;
     }
-    const tokens = norm.split(" ").filter(Boolean);
+    // Stem each token to conflate Turkish surface forms ("mecliste",
+    // "meclisten", "meclisin" → "meclis") for better TF-IDF cosine on
+    // paraphrased articles. stemTurkish is conservative — only nominal
+    // suffixes with a minimum stem length guard to avoid over-conflation.
+    const tokens = norm.split(" ").filter(Boolean).map(stemTurkish);
     const tf = new Map();
     for (const t of tokens) {
       tf.set(t, (tf.get(t) || 0) + 1);

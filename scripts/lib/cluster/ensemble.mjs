@@ -77,6 +77,7 @@ import {
   TFIDF_WEIGHT,
   ENTITY_WEIGHT,
   ENTITY_DENOM_MIN,
+  ENTITY_FRESHNESS_HOURS,
 } from "./constants.mjs";
 import {
   jaccardFromSignatures,
@@ -123,30 +124,28 @@ const SOURCE_PENALTIES = {
 // 1 - Δt/48 decay only knocks ~12% off, which isn't enough to split a pair
 // whose entity ratio carried them over threshold in the first place.
 //
-// Fix: decay the entity contribution itself on a much tighter window. At
-// |Δt| = 4h the entity ratio is halved; at 8h+ it stays at 0.5x (we keep
-// a 0.5 floor so same-entity co-occurrence remains *some* signal for
-// longer-running stories rather than vanishing outright). This lets the
-// ensemble still merge a true follow-up that reuses the same entities a
-// few hours later, while denying cheap entity-only matches at 6h+ deltas.
+// Fix: decay the entity contribution itself on a tighter window. The
+// ENTITY_FRESHNESS_HOURS constant (imported from constants.mjs) controls
+// how quickly the entity signal decays. The 0.5 floor keeps late follow-ups
+// reachable via a strong TF-IDF + MinHash lane; entity alone just stops
+// carrying the pair across the 0.48 threshold after the floor engages.
 //
 // Formula (applied inside `score()`):
 //
 //     entityFreshness = max(0.5, 1 - hoursDelta / ENTITY_FRESHNESS_HOURS)
 //     entityRatio    *= entityFreshness
 //
-// Tabulated:
-//       0h → max(0.5, 1 - 0/4)  = max(0.5, 1.00) = 1.00  (no decay)
-//       1h → max(0.5, 1 - 1/4)  = max(0.5, 0.75) = 0.75
-//       2h → max(0.5, 1 - 2/4)  = max(0.5, 0.50) = 0.50  (floor engages)
-//       4h → max(0.5, 1 - 4/4)  = max(0.5, 0.00) = 0.50  (halved, per brief)
-//       6h → max(0.5, 1 - 6/4)  = max(0.5, -0.5) = 0.50  (A1's concrete case)
-//       8h → max(0.5, 1 - 8/4)  = max(0.5, -1.0) = 0.50  (floor holds)
+// Tabulated (at ENTITY_FRESHNESS_HOURS = 6):
+//       0h → max(0.5, 1 - 0/6)  = max(0.5, 1.000) = 1.000  (no decay)
+//       1h → max(0.5, 1 - 1/6)  = max(0.5, 0.833) = 0.833
+//       2h → max(0.5, 1 - 2/6)  = max(0.5, 0.667) = 0.667
+//       3h → max(0.5, 1 - 3/6)  = max(0.5, 0.500) = 0.500  (floor engages)
+//       6h → max(0.5, 1 - 6/6)  = max(0.5, 0.000) = 0.500  (floor holds)
 //
-// The floor at 0.5 (rather than 0) intentionally keeps late follow-ups
-// reachable via a strong TF-IDF + MinHash lane; entity alone just stops
-// carrying the pair across the 0.48 threshold after ~4h.
-const ENTITY_FRESHNESS_HOURS = 4;
+// Previously 4h — the floor engaged at just 2h, halving the entity signal
+// too aggressively for multi-hour developing stories. At 6h the floor
+// engages at 3h: still tight enough to split unrelated hot-entity pairs
+// while giving genuine follow-ups more room to merge.
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -402,13 +401,13 @@ if (process.argv[1] === import.meta.url.replace("file://", "")) {
   // numbers exactly without relying on a specific MinHash landing on
   // a specific Jaccard value for a specific pair of rewrites.
   //
-  // Expected math (post-A1 entity freshness decay):
+  // Expected math (post-A1 entity freshness decay, ENTITY_FRESHNESS_HOURS=6):
   //   jaccardScore    = 0.6 + 0.4*0.75 = 0.9
   //   entityRatioRaw  = 2/3 ≈ 0.667
-  //   entityFreshness @ 0.5h = max(0.5, 1 - 0.5/4) = 0.875
-  //   entityRatio     = 0.667 * 0.875 ≈ 0.5833
-  //   primary         = 0.40*0.3 + 0.60*0.5833 = 0.12 + 0.35 = 0.47
-  //   raw             = max(0.9, 0.47) = 0.9
+  //   entityFreshness @ 0.5h = max(0.5, 1 - 0.5/6) ≈ 0.9167
+  //   entityRatio     = 0.667 * 0.9167 ≈ 0.6111
+  //   primary         = 0.40*0.3 + 0.60*0.6111 = 0.12 + 0.3667 = 0.4867
+  //   raw             = max(0.9, 0.4867) = 0.9
   //   timeDecay       = 1 - 0.5/48 ≈ 0.9896
   //   final           ≈ 0.8906  (well above 0.48)
   //
@@ -446,13 +445,15 @@ if (process.argv[1] === import.meta.url.replace("file://", "")) {
       Math.abs(r.components.entityRatioRaw - 2 / 3) < 1e-9,
       `Test 2 entityRatioRaw = ${r.components.entityRatioRaw.toFixed(3)} (expect 0.667 = 2/max(3,min(3,3)))`,
     );
+    // ENTITY_FRESHNESS_HOURS = 6: freshness @ 0.5h = max(0.5, 1 - 0.5/6) ≈ 0.9167
+    const expectedFreshness = 1 - 0.5 / ENTITY_FRESHNESS_HOURS;
     assert(
-      Math.abs(r.components.entityFreshness - 0.875) < 1e-9,
-      `Test 2 entityFreshness @ 0.5h = ${r.components.entityFreshness.toFixed(3)} (expect 0.875 = 1 - 0.5/4)`,
+      Math.abs(r.components.entityFreshness - expectedFreshness) < 1e-9,
+      `Test 2 entityFreshness @ 0.5h = ${r.components.entityFreshness.toFixed(4)} (expect ${expectedFreshness.toFixed(4)} = 1 - 0.5/${ENTITY_FRESHNESS_HOURS})`,
     );
     assert(
-      Math.abs(r.components.entityRatio - (2 / 3) * 0.875) < 1e-9,
-      `Test 2 entityRatio (post-A1 decay) = ${r.components.entityRatio.toFixed(3)} (expect ${((2 / 3) * 0.875).toFixed(3)} = 0.667*0.875)`,
+      Math.abs(r.components.entityRatio - (2 / 3) * expectedFreshness) < 1e-9,
+      `Test 2 entityRatio (post-A1 decay) = ${r.components.entityRatio.toFixed(4)} (expect ${((2 / 3) * expectedFreshness).toFixed(4)} = 0.667*${expectedFreshness.toFixed(4)})`,
     );
     assert(
       r.score >= MATCH_THRESHOLD,

@@ -67,3 +67,14 @@ export const MINHASH_SIG_K = 64;                   // MinHash signature length (
 
 export const MAX_CANDIDATE_CLUSTERS = 20;          // per-article candidate cap before tfidf scoring
 export const ENTITY_DENOM_MIN = 3;                 // R2 + R3: noise floor so tiny sets don't inflate
+
+// A1 cluster-glue fix: entity contribution decays on this window so hot
+// entities (Erdoğan, MHP, …) can't carry a pair across threshold when the
+// underlying stories describe different actions. At ENTITY_FRESHNESS_HOURS
+// the raw formula `1 - Δt/window` would hit 0; the 0.5 floor in ensemble.mjs
+// keeps late follow-ups reachable. Increased from 4 → 6: the old 4h window
+// hit the 0.5 floor at just 2h, which was too aggressive for multi-hour
+// developing stories (e.g. a cabinet reshuffle unfolding over 3-5h). At 6h
+// the floor engages at 3h — still tight enough to split unrelated hot-entity
+// pairs while giving genuine follow-ups more room to merge.
+export const ENTITY_FRESHNESS_HOURS = 6;

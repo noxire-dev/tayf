@@ -321,6 +321,7 @@ async function getClusterContext({ force = false } = {}) {
     fetchedAt: now,
     clusters: fresh.clusters,
     seedByCluster: fresh.seedByCluster,
+    latestByCluster: fresh.latestByCluster,
     sourceIdsByCluster: fresh.sourceIdsByCluster,
     indices: fresh.indices,
   };
@@ -404,7 +405,9 @@ async function loadClusterContext() {
     return {
       clusters: [],
       seedByCluster: new Map(),
+      latestByCluster: new Map(),
       sourceIdsByCluster: new Map(),
+      indices: { byFingerprint: new Map(), byEntity: new Map() },
     };
   }
 
@@ -433,7 +436,9 @@ async function loadClusterContext() {
     return {
       clusters,
       seedByCluster: new Map(),
+      latestByCluster: new Map(),
       sourceIdsByCluster: new Map(),
+      indices: { byFingerprint: new Map(), byEntity: new Map() },
     };
   }
 
@@ -495,14 +500,44 @@ async function loadClusterContext() {
     }
   }
 
+  // Track the most recently published member per cluster (distinct from seed)
+  // so the scoring loop can compare new articles against the latest story
+  // framing, not just the original seed text. For developing stories the
+  // latest member uses vocabulary closer to incoming articles, boosting
+  // recall on multi-hour news cycles. Only useful for clusters with 2+
+  // members — single-article clusters have no "latest" distinct from seed.
+  const latestByCluster = new Map();
+  for (const [clusterId, ids] of memberIdsByCluster.entries()) {
+    const seed = seedByCluster.get(clusterId);
+    if (!seed) continue;
+    let latest = null;
+    for (const id of ids) {
+      const art = memberArticles.get(id);
+      if (!art || art.id === seed.id) continue;
+      if (
+        !latest ||
+        new Date(art.published_at) > new Date(latest.published_at)
+      ) {
+        latest = art;
+      }
+    }
+    if (latest) {
+      // Compute MinHash signature (not persisted, same as seeds).
+      const fp = fingerprint(latest.title || "", latest.description || "");
+      latest.signature = fp.signature;
+      if (!latest.fingerprint) latest.fingerprint = fp.strict;
+      latestByCluster.set(clusterId, latest);
+    }
+  }
+
   // Inverted indices cover ALL member fingerprints + entities (not just
   // seed), so late wire-copies can still find an existing cluster. Scoring
-  // still runs against the seed; a dedicated strict-fp fast-path in
-  // runCycleBody short-circuits when `article.fingerprint` matches any
-  // indexed member.
+  // now runs against both seed and latest member; the dedicated strict-fp
+  // fast-path in runCycleBody still short-circuits when `article.fingerprint`
+  // matches any indexed member.
   const indices = buildMemberIndicesFromRows(caRows, memberArticles);
 
-  return { clusters, seedByCluster, sourceIdsByCluster, indices };
+  return { clusters, seedByCluster, latestByCluster, sourceIdsByCluster, indices };
 }
 
 // ---------------------------------------------------------------------------
@@ -806,7 +841,7 @@ async function runCycleBody(batch, cycleNum, startedAt, stats) {
   log("cluster", `enriched ${enriched}/${batch.length} rows`);
 
   const ctx = await getClusterContext();
-  const { clusters, seedByCluster, indices, cached } = ctx;
+  const { clusters, seedByCluster, latestByCluster, indices, cached } = ctx;
   log(
     "cluster",
     `${cached ? "cache-hit" : "refreshed"} ${clusters.length} active clusters (${seedByCluster.size} politics seeds)`
@@ -826,6 +861,14 @@ async function runCycleBody(batch, cycleNum, startedAt, stats) {
   }
   for (const a of batch) {
     tfidf.addDoc(a.id, `${a.title || ""} ${a.description || ""}`);
+  }
+  // Add latest member articles to the TF-IDF index so the dual-scoring
+  // path can compute cosine between new articles and the latest member
+  // (not just the seed). For clusters where the story vocabulary has
+  // evolved, the latest member's TF-IDF vector is closer to incoming
+  // articles than the seed's.
+  for (const [, latest] of (latestByCluster || new Map()).entries()) {
+    tfidf.addDoc(latest.id, `${latest.title || ""} ${latest.description || ""}`);
   }
   tfidf.finalize();
 
@@ -906,34 +949,69 @@ async function runCycleBody(batch, cycleNum, startedAt, stats) {
     for (const clusterId of candidateIds) {
       const seed = seedByCluster.get(clusterId);
       if (!seed) continue;
-      const hoursDelta = hoursBetween(article.published_at, seed.published_at);
-      if (hoursDelta > TIME_WINDOW_HOURS) continue;
+      const hoursDeltaSeed = hoursBetween(article.published_at, seed.published_at);
+      if (hoursDeltaSeed > TIME_WINDOW_HOURS) continue;
       const seedFp = {
         strict: seed.fingerprint ?? null,
         signature: seed.signature ?? null,
       };
-      const tfidfCosine = tfidf.cosine(article.id, seed.id);
+      const tfidfCosineSeed = tfidf.cosine(article.id, seed.id);
       // C5-HABERLER: pass per-side source slugs into the scorer so the
       // SOURCE_PENALTIES table in ensemble.mjs can downweight haberler-com
       // (and any future aggregator firehoses) at clustering time. Both
       // sides go through sourceLookup so the lookup is consistent regardless
       // of whether the seed was loaded from cache or freshly registered.
       const aSourceSlug = sourceLookup.get(article.source_id)?.slug;
-      const bSourceSlug = sourceLookup.get(seed.source_id)?.slug;
-      const res = score(
+      const bSourceSlugSeed = sourceLookup.get(seed.source_id)?.slug;
+      const seedRes = score(
         articleFp,
         seedFp,
         article.entities || [],
         seed.entities || [],
-        tfidfCosine,
-        hoursDelta,
-        { aSourceSlug, bSourceSlug }
+        tfidfCosineSeed,
+        hoursDeltaSeed,
+        { aSourceSlug, bSourceSlug: bSourceSlugSeed }
       );
-      if (res.score >= FALLBACK_FLOOR) {
+
+      // Dual-scoring: also score against the cluster's latest member (if
+      // available and distinct from seed). For developing stories the latest
+      // member's vocabulary is closer to incoming articles than the seed's
+      // original framing. Take the max of seed and latest scores — either
+      // representative can carry the pair across threshold. The cost is one
+      // extra score() call (pure arithmetic) + one TF-IDF cosine (sparse
+      // dot product) per candidate, negligible vs. the DB round-trips.
+      let bestRes = seedRes;
+      const latest = latestByCluster?.get(clusterId);
+      if (latest) {
+        const hoursDeltaLatest = hoursBetween(
+          article.published_at,
+          latest.published_at,
+        );
+        if (hoursDeltaLatest <= TIME_WINDOW_HOURS) {
+          const latestFp = {
+            strict: latest.fingerprint ?? null,
+            signature: latest.signature ?? null,
+          };
+          const tfidfCosineLatest = tfidf.cosine(article.id, latest.id);
+          const bSourceSlugLatest = sourceLookup.get(latest.source_id)?.slug;
+          const latestRes = score(
+            articleFp,
+            latestFp,
+            article.entities || [],
+            latest.entities || [],
+            tfidfCosineLatest,
+            hoursDeltaLatest,
+            { aSourceSlug, bSourceSlug: bSourceSlugLatest },
+          );
+          if (latestRes.score > bestRes.score) bestRes = latestRes;
+        }
+      }
+
+      if (bestRes.score >= FALLBACK_FLOOR) {
         scoredCandidates.push({
           clusterId,
-          score: res.score,
-          components: res.components,
+          score: bestRes.score,
+          components: bestRes.components,
         });
       }
     }

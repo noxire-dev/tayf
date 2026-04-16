@@ -99,6 +99,55 @@ export function normalizeTurkish(text) {
 }
 
 // ---------------------------------------------------------------------------
+// Turkish suffix stripping (for TF-IDF only — NOT used by fingerprinting)
+// ---------------------------------------------------------------------------
+//
+// Turkish is agglutinative: "mecliste", "meclisten", "meclisin" are all
+// "meclis" but without stemming they produce 3 distinct TF-IDF tokens,
+// reducing cosine similarity between paraphrased articles about the same
+// topic. This conservative stemmer strips the most common *nominal*
+// suffixes (plural, case, genitive) to conflate surface forms.
+//
+// Design choices:
+//   - Longest suffix first so compound suffixes match before their
+//     components ("bakanlardan" → strip "lardan" → "bakan", not "lar" →
+//     "bakandan").
+//   - Minimum stem length of 3 (or 4 for 2-char suffixes) to prevent
+//     over-stemming short words (e.g. "dolar" stays "dolar", not "do").
+//   - Only nominal suffixes — no verb morphology (too noisy for bag-of-words).
+//   - Exported separately from normalizeTurkish() so fingerprinting stays
+//     unchanged; only imported by tfidf.mjs.
+
+export function stemTurkish(token) {
+  if (!token || token.length <= 4 || /^\d+$/.test(token)) return token;
+  // [suffix, minStemLength] pairs ordered longest-first.
+  const rules = [
+    // 6-char: plural + ablative
+    ["lerden", 3], ["lardan", 3],
+    // 5-char: plural + locative / genitive
+    ["lerde", 3], ["larda", 3], ["lerin", 3], ["larin", 3],
+    // 4-char: plural + accusative / dative
+    ["leri", 3], ["lari", 3], ["lere", 3], ["lara", 3],
+    // 3-char: plural
+    ["ler", 3], ["lar", 3],
+    // 3-char: ablative
+    ["dan", 3], ["den", 3], ["tan", 3], ["ten", 3],
+    // 3-char: genitive (buffer-n forms)
+    ["nin", 3], ["nun", 3],
+    // 3-char: locative (buffer-n forms)
+    ["nda", 3], ["nde", 3],
+    // 2-char: locative (stricter min stem to avoid false conflation)
+    ["da", 4], ["de", 4], ["ta", 4], ["te", 4],
+  ];
+  for (const [suf, minStem] of rules) {
+    if (token.endsWith(suf) && (token.length - suf.length) >= minStem) {
+      return token.slice(0, -suf.length);
+    }
+  }
+  return token;
+}
+
+// ---------------------------------------------------------------------------
 // Shingling
 // ---------------------------------------------------------------------------
 
