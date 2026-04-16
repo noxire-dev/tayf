@@ -168,27 +168,32 @@ function summaryFallback(description) {
 async function enrichArticles(articles) {
   const updates = [];
   for (const a of articles) {
-    const needsFp = !a.fingerprint;
-    const needsEnt = !Array.isArray(a.entities) || a.entities.length === 0;
-
-    // D1 wired fingerprint() to a 3-tier bundle: { strict, shingles, signature }.
-    // We store `strict` in the existing DB column and keep `signature` in
-    // memory on the article object for this cycle — ensemble.score() reads
-    // `.signature` for the MinHash soft-accept lane. If the article already
-    // has a persisted fingerprint we still need to compute the signature in
-    // memory, so fingerprint() runs unconditionally. It's cheap (~one
-    // tokenize + 64-slot min pass).
+    // Always recompute. Audit found persisted fingerprints drifting from
+    // the current algorithm's output on the same title — caused by post-
+    // ingestion title mutations (migrations 018, 019). Trusting the DB
+    // cache meant wire-copy articles with stale hashes couldn't auto-accept
+    // each other. Recompute every cycle, persist if the result changed.
     const fp = fingerprint(a.title || "", a.description || "");
     a.signature = fp.signature;
-    if (needsFp) a.fingerprint = fp.strict;
 
-    if (needsEnt) {
-      a.entities = extractEntities(`${a.title || ""} ${a.description || ""}`) || [];
-    } else if (!Array.isArray(a.entities)) {
-      a.entities = [];
+    const oldFp = a.fingerprint;
+    const oldEnts = Array.isArray(a.entities) ? a.entities : [];
+    const freshEnts =
+      extractEntities(`${a.title || ""} ${a.description || ""}`) || [];
+
+    a.fingerprint = fp.strict;
+    a.entities = freshEnts;
+
+    const fpChanged = oldFp !== fp.strict;
+    let entsChanged = oldEnts.length !== freshEnts.length;
+    if (!entsChanged) {
+      const oldSet = new Set(oldEnts);
+      for (const e of freshEnts) {
+        if (!oldSet.has(e)) { entsChanged = true; break; }
+      }
     }
 
-    if (!needsFp && !needsEnt) continue;
+    if (!fpChanged && !entsChanged) continue;
 
     // Supabase upsert path needs the full NOT NULL payload, not just the
     // delta — so we rebuild the row from in-memory state. Any article that
@@ -276,17 +281,7 @@ function markClusterHasSource(clusterId, sourceId) {
 function registerNewClusterInCache(clusterId, seed) {
   if (!clusterContextCache) return;
   clusterContextCache.seedByCluster.set(clusterId, seed);
-  const idx = clusterContextCache.indices;
-  if (seed.fingerprint) {
-    const list = idx.byFingerprint.get(seed.fingerprint) || [];
-    list.push(clusterId);
-    idx.byFingerprint.set(seed.fingerprint, list);
-  }
-  for (const ent of seed.entities || []) {
-    const list = idx.byEntity.get(ent) || [];
-    list.push(clusterId);
-    idx.byEntity.set(ent, list);
-  }
+  addMemberToIndices(clusterId, seed);
   // Seed the per-source set so the dedupe guard sees the creating article
   // on the very next iteration of this same cycle.
   if (seed.source_id) {
@@ -327,9 +322,50 @@ async function getClusterContext({ force = false } = {}) {
     clusters: fresh.clusters,
     seedByCluster: fresh.seedByCluster,
     sourceIdsByCluster: fresh.sourceIdsByCluster,
-    indices: buildCandidateIndices(fresh.seedByCluster),
+    indices: fresh.indices,
   };
   return { ...clusterContextCache, cached: false };
+}
+
+// Build inverted indices from ALL member fingerprints + entities, not just
+// the seed. Audit (2026-04-17) found 47 cross-cluster pairs with score=1.0
+// that should have merged but didn't — late wire-copies couldn't find their
+// home because only the seed's fp/entities were indexed. Indexing every
+// member catches these.
+function buildMemberIndicesFromRows(caRows, memberArticles) {
+  const byFingerprint = new Map();  // fp string → clusterId[]
+  const byEntity = new Map();       // entity string → clusterId[]
+  // Track (cluster, fp) and (cluster, ent) pairs already seen so we don't
+  // balloon the inverted lists with duplicates — multiple members of the
+  // same cluster often share fingerprints (wire-copy siblings).
+  const fpSeen = new Set();
+  const entSeen = new Set();
+
+  for (const row of caRows) {
+    const art = memberArticles.get(row.article_id);
+    if (!art) continue;
+    if (art.fingerprint) {
+      const key = `${row.cluster_id}|${art.fingerprint}`;
+      if (!fpSeen.has(key)) {
+        fpSeen.add(key);
+        const list = byFingerprint.get(art.fingerprint) || [];
+        list.push(row.cluster_id);
+        byFingerprint.set(art.fingerprint, list);
+      }
+    }
+    if (Array.isArray(art.entities)) {
+      for (const ent of art.entities) {
+        const key = `${row.cluster_id}|${ent}`;
+        if (entSeen.has(key)) continue;
+        entSeen.add(key);
+        const list = byEntity.get(ent) || [];
+        list.push(row.cluster_id);
+        byEntity.set(ent, list);
+      }
+    }
+  }
+
+  return { byFingerprint, byEntity };
 }
 
 async function loadClusterContext() {
@@ -338,20 +374,32 @@ async function loadClusterContext() {
   ).toISOString();
 
   // Clusters whose most recent activity is within the window.
-  // Cap at 2000 to keep URI lengths sane on the follow-up .in() lookups.
-  const clustersRes = await supabase
-    .from("clusters")
-    .select(
-      "id, title_tr, bias_distribution, first_published, updated_at, article_count"
-    )
-    .gte("updated_at", cutoffIso)
-    .order("updated_at", { ascending: false })
-    .limit(2000);
-
-  if (clustersRes.error) {
-    throw new Error(`loadClusterContext clusters: ${clustersRes.error.message}`);
+  // Was `.limit(2000)` — audit (2026-04-17) found 2,469 clusters in the 48h
+  // politics window, so ~470 older-activity clusters were falling off the
+  // seed index every cycle. New wire-copies of stories in those clusters
+  // couldn't find a match → spawned duplicate clusters. Page through
+  // instead; the follow-up `.in()` lookups are already chunked to keep URI
+  // lengths sane.
+  const clusters = [];
+  {
+    const PAGE = 1000;
+    for (let offset = 0; offset < 100_000; offset += PAGE) {
+      const res = await supabase
+        .from("clusters")
+        .select(
+          "id, title_tr, bias_distribution, first_published, updated_at, article_count"
+        )
+        .gte("updated_at", cutoffIso)
+        .order("updated_at", { ascending: false })
+        .range(offset, offset + PAGE - 1);
+      if (res.error) {
+        throw new Error(`loadClusterContext clusters: ${res.error.message}`);
+      }
+      const page = res.data ?? [];
+      clusters.push(...page);
+      if (page.length < PAGE) break;
+    }
   }
-  const clusters = clustersRes.data ?? [];
   if (clusters.length === 0) {
     return {
       clusters: [],
@@ -447,33 +495,44 @@ async function loadClusterContext() {
     }
   }
 
-  return { clusters, seedByCluster, sourceIdsByCluster };
+  // Inverted indices cover ALL member fingerprints + entities (not just
+  // seed), so late wire-copies can still find an existing cluster. Scoring
+  // still runs against the seed; a dedicated strict-fp fast-path in
+  // runCycleBody short-circuits when `article.fingerprint` matches any
+  // indexed member.
+  const indices = buildMemberIndicesFromRows(caRows, memberArticles);
+
+  return { clusters, seedByCluster, sourceIdsByCluster, indices };
 }
 
 // ---------------------------------------------------------------------------
 // 5. Candidate search — which clusters could this article belong to?
-//    - Fingerprint exact match (O(1) via map)
-//    - Entity overlap (O(N) lookup via inverted index on seed entities)
+//    - Fingerprint exact match (O(1) via inverted index over ALL members)
+//    - Entity overlap (inverted index over ALL member entities)
+//
+// Indices are built up-front in loadClusterContext() via
+// buildMemberIndicesFromRows(), and patched in-place by
+// registerNewClusterInCache() / addMemberToIndices() as clusters evolve
+// during the cycle.
 // ---------------------------------------------------------------------------
 
-function buildCandidateIndices(seedByCluster) {
-  const byFingerprint = new Map();
-  const byEntity = new Map();
-
-  for (const [clusterId, seed] of seedByCluster.entries()) {
-    if (seed.fingerprint) {
-      const list = byFingerprint.get(seed.fingerprint) || [];
+function addMemberToIndices(clusterId, article) {
+  if (!clusterContextCache) return;
+  const idx = clusterContextCache.indices;
+  if (article.fingerprint) {
+    const list = idx.byFingerprint.get(article.fingerprint) || [];
+    if (!list.includes(clusterId)) {
       list.push(clusterId);
-      byFingerprint.set(seed.fingerprint, list);
-    }
-    for (const ent of seed.entities || []) {
-      const list = byEntity.get(ent) || [];
-      list.push(clusterId);
-      byEntity.set(ent, list);
+      idx.byFingerprint.set(article.fingerprint, list);
     }
   }
-
-  return { byFingerprint, byEntity };
+  for (const ent of article.entities || []) {
+    const list = idx.byEntity.get(ent) || [];
+    if (!list.includes(clusterId)) {
+      list.push(clusterId);
+      idx.byEntity.set(ent, list);
+    }
+  }
 }
 
 function findCandidateClusters(article, indices) {
@@ -768,6 +827,53 @@ async function runCycleBody(batch, cycleNum, startedAt, stats) {
 
   for (const article of batch) {
     if (shutdown.isShuttingDown()) break;
+    // FAST-PATH: strict-fingerprint match against any cluster member.
+    // Audit (2026-04-17) found 47 cross-cluster pairs scoring exactly 1.0
+    // that should have been single clusters — all wire-copies whose
+    // matching peer happened to be a non-seed member. The member-level
+    // inverted index now surfaces those; we merge them directly without
+    // scoring against a possibly-different-worded seed. try/catch wraps
+    // the DB work so a failure here falls through to the ensemble path
+    // instead of killing the whole article.
+    if (article.fingerprint) {
+      const fpHit = indices.byFingerprint.get(article.fingerprint) || [];
+      if (fpHit.length > 0) {
+        let assignedFp = false;
+        const blockedFp = new Set();
+        try {
+          for (const clusterId of fpHit) {
+            if (blockedFp.has(clusterId)) continue;
+            const result = await addArticleToCluster(
+              sourceLookup,
+              clusterId,
+              article,
+            );
+            if (result && result.skipped) {
+              blockedFp.add(clusterId);
+              stats.skippedDupes++;
+              continue;
+            }
+            stats.matched++;
+            assignedFp = true;
+            addMemberToIndices(clusterId, article);
+            if (DEBUG) {
+              log(
+                "cluster",
+                `fp-match art=${article.id.slice(0, 8)} cluster=${String(clusterId).slice(0, 8)}`,
+              );
+            }
+            break;
+          }
+        } catch (err) {
+          log(
+            "cluster",
+            `fp-fast-path error for ${article.id}: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+        if (assignedFp) continue;  // next article
+      }
+    }
+
     const candidateIds = findCandidateClusters(article, indices);
     // D3's new ensemble.score() signature is (aFp, bFp, aEntities, bEntities,
     // tfidfCosine, hoursDelta). The fingerprint bundle is `{ strict, signature }`
@@ -864,6 +970,11 @@ async function runCycleBody(batch, cycleNum, startedAt, stats) {
           }
           stats.matched++;
           assigned = true;
+          // Mirror the article into the member indices so subsequent
+          // articles in this cycle can match on its fp/entities (not just
+          // the seed's). Without this patch the fast-path and entity
+          // overlap gate would still only see seed signals.
+          addMemberToIndices(cand.clusterId, article);
           if (blockedClusters.size > 0) {
             log(
               "cluster",
