@@ -1,4 +1,4 @@
-import { unstable_cache } from "next/cache";
+import { cacheLife, cacheTag } from "next/cache";
 
 import type {
   ClusterCardArticle,
@@ -202,7 +202,7 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
       .returns<EmbeddedClusterRow[]>();
 
     if (error) {
-      console.error("[clusters] embedded select error", error.message);
+      console.warn("[clusters] embedded select error:", error.message);
       return { bundles: [], prefilterCount: 0 };
     }
     const clusterRows = data ?? [];
@@ -416,7 +416,7 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
 
     return { bundles: ranked, prefilterCount: clusterRows.length };
   } catch (err) {
-    console.error("[clusters] unexpected error", err);
+    console.warn("[clusters] unexpected error:", err);
     return { bundles: [], prefilterCount: 0 };
   }
 }
@@ -636,19 +636,17 @@ function scoreCluster(
 // Public cached entry point. The page component calls this identical
 // signature — the cache layer is invisible from the call site.
 //
-// Cache key: `clusters:politics:v6` (bumped from v5 when R3's
-// source-fairness cap landed — the score formula now takes
-// min(wire-collapse, fairness-cap), so any v5 entries cached from the
-// pre-R3 ranker would be ordered incorrectly and would still rank
-// haberler-com-dominated clusters too highly).
+// Cache Components migration (Next.js 16): replaces the previous
+// `unstable_cache` wrapper with the `use cache` directive. The function's
+// arguments (none here) automatically become part of the cache key, and
+// `cacheLife` / `cacheTag` control TTL and on-demand invalidation.
+//
 // Tag: `clusters-politics` — cluster-worker can call
 // `revalidateTag("clusters-politics")` after a write cycle to push fresh
 // data immediately without waiting for the 30s TTL.
-export const getPoliticsClusters = unstable_cache(
-  fetchPoliticsClusters,
-  ["clusters:politics:v6"],
-  {
-    revalidate: 30,
-    tags: ["clusters-politics"],
-  }
-);
+export async function getPoliticsClusters(): Promise<PoliticsClustersResult> {
+  "use cache";
+  cacheLife("cluster-feed");
+  cacheTag("clusters-politics");
+  return fetchPoliticsClusters();
+}

@@ -49,6 +49,21 @@ import type { NextConfig } from "next";
  * falling back to `unoptimized: true`.
  */
 const nextConfig: NextConfig = {
+  cacheComponents: true,
+  cacheLife: {
+    // Cluster data refreshes every 30s (matches cluster-worker cycle).
+    'cluster-feed': {
+      stale: 30,
+      revalidate: 30,
+      expire: 300,
+    },
+    // Source directory shifts weekly; 5-minute cache is plenty fresh.
+    'source-directory': {
+      stale: 60,
+      revalidate: 300,
+      expire: 3600,
+    },
+  },
   images: {
     remotePatterns: [
       { protocol: "https", hostname: "**" },

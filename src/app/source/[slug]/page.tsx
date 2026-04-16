@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { unstable_cache } from "next/cache";
+import { cacheLife, cacheTag } from "next/cache";
 import { ArrowLeft, ExternalLink } from "lucide-react";
 
 import { BiasBadge } from "@/components/story/bias-badge";
@@ -25,8 +25,6 @@ import type { Source } from "@/types";
 // to Supabase. Cache TTL matches the route segment `revalidate` so the SSR
 // shell and the data evict together.
 
-export const revalidate = 300;
-
 interface PageProps {
   // Next.js 16: dynamic-route `params` is a Promise.
   params: Promise<{ slug: string }>;
@@ -47,9 +45,12 @@ interface SourceProfile {
   articles: ArticleRow[];
 }
 
-const getSourceProfile = unstable_cache(
-  async (slug: string): Promise<SourceProfile | null> => {
-    const supabase = createServerClient();
+async function getSourceProfile(slug: string): Promise<SourceProfile | null> {
+  "use cache";
+  cacheLife("source-directory");
+  cacheTag("sources", "articles");
+
+  const supabase = createServerClient();
 
     const { data: sourceRow, error: sourceError } = await supabase
       .from("sources")
@@ -96,15 +97,12 @@ const getSourceProfile = unstable_cache(
       );
     }
 
-    return {
-      source,
-      articleCount7d: countResult.count ?? 0,
-      articles: (articlesResult.data ?? []) as ArticleRow[],
-    };
-  },
-  ["source-profile-v1"],
-  { revalidate: 300, tags: ["sources", "articles"] },
-);
+  return {
+    source,
+    articleCount7d: countResult.count ?? 0,
+    articles: (articlesResult.data ?? []) as ArticleRow[],
+  };
+}
 
 // Dynamic SEO metadata. Per Next.js 16, dynamic-route metadata must be
 // produced by an exported async `generateMetadata` (the static `metadata`

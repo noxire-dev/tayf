@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { Suspense } from "react";
 import { DM_Serif_Display, Plus_Jakarta_Sans, JetBrains_Mono } from "next/font/google";
 import { Header } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
@@ -99,7 +100,9 @@ export default function RootLayout({
       className={`${serif.variable} ${sans.variable} ${mono.variable} h-full antialiased dark`}
     >
       <body className="min-h-full flex flex-col">
-        <Header />
+        <Suspense>
+          <Header />
+        </Suspense>
         <main className="flex-1">{children}</main>
         <Footer />
         <KbdShortcuts />

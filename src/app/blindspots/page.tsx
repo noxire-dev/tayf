@@ -1,4 +1,4 @@
-import { unstable_cache } from "next/cache";
+import { cacheLife, cacheTag } from "next/cache";
 import { connection } from "next/server";
 import { Eye } from "lucide-react";
 
@@ -33,8 +33,6 @@ import type {
 // article_count ≥ 3 (Wave-1 minimum to call something a "story" rather than
 // a stray report). The shape returned is a strict superset of ClusterBundle
 // so we can hand it straight to <ClusterCard> via composition.
-
-export const revalidate = 30;
 
 // A6-BLINDR: loosened 0.85 → 0.80 so a 4-of-5 split (80% share)
 // qualifies. At 0.85 with MIN=4 we had 3 entries; 0.80 lifted to 7;
@@ -346,28 +344,21 @@ function normalizeDistribution(raw: unknown): BiasDistribution {
   return empty;
 }
 
-const getBlindspots = unstable_cache(
-  fetchBlindspots,
-  ["blindspots-v7-a6"],
-  { revalidate: 30, tags: ["clusters", "clusters-politics"] }
-);
+async function getBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
+  "use cache";
+  cacheLife("cluster-feed");
+  cacheTag("clusters", "clusters-politics");
+  return fetchBlindspots();
+}
 
 export default async function BlindspotsPage() {
-  // `connection()` opts this render out of static prerendering at runtime
-  // (the modern replacement for `unstable_noStore`). It marks the page
-  // as dynamic so we can safely read request-time state below.
+  // connection() signals to PPR that the code below must run at request
+  // time (Date.now() is non-deterministic). The loading.tsx Suspense
+  // boundary provides the static shell while this streams in.
   await connection();
 
   const { bundles } = await getBlindspots();
 
-  // Single per-request snapshot used to flag "aging" clusters (>48h since
-  // last update). Server Components are evaluated once per request, so
-  // capturing `Date.now()` here is safe — the resulting boolean is passed
-  // down to <ClusterCard> as a plain prop. We disable `react-hooks/purity`
-  // for the next line because the lint rule's static analysis can't tell
-  // that this function is a Server Component (one-shot render), not a
-  // client component that might re-render. `connection()` above already
-  // forces dynamic rendering at runtime.
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
 

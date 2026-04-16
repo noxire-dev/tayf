@@ -1,4 +1,4 @@
-import { unstable_cache } from "next/cache";
+import { cacheLife, cacheTag } from "next/cache";
 
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { createServerClient } from "@/lib/supabase/server";
@@ -160,8 +160,8 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     ]);
 
     if (clusterRes.error) {
-      console.error(
-        "[cluster-detail] cluster query error",
+      console.warn(
+        "[cluster-detail] cluster query error:",
         clusterRes.error.message
       );
       return null;
@@ -172,14 +172,14 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     }
 
     if (membersRes.error) {
-      console.error(
-        "[cluster-detail] members query error",
+      console.warn(
+        "[cluster-detail] members query error:",
         membersRes.error.message
       );
     }
     if (sourcesRes.error) {
-      console.error(
-        "[cluster-detail] sources query error",
+      console.warn(
+        "[cluster-detail] sources query error:",
         sourcesRes.error.message
       );
     }
@@ -277,42 +277,20 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
       allSources: sourcesRes.data ?? [],
     };
   } catch (err) {
-    console.error("[cluster-detail] unexpected error", err);
+    console.warn("[cluster-detail] unexpected error:", err);
     return null;
   }
 }
 
-// Public cached entry point. The id is baked into BOTH the cache key
-// parts and the invalidation tags so that:
-//   - `unstable_cache` keys per-cluster (different ids are separate
-//     cache entries);
-//   - callers / workers can invalidate a single cluster with
-//     `revalidateTag(\`cluster-detail:\${id}\`)` without nuking every
-//     other cluster's entry.
-//
-// Because `unstable_cache` bakes `tags` at wrap-time (not per-call),
-// we build the wrapper lazily per-id and memoize by id in-process so
-// we don't allocate a new wrapped function on every request.
-const wrapperById = new Map<
-  string,
-  (id: string) => Promise<ClusterDetail | null>
->();
-
+// Public cached entry point. With Cache Components the `id` argument
+// is automatically part of the cache key — no per-id wrapper Map needed.
+// Callers / workers can invalidate a single cluster with
+// `revalidateTag(\`cluster-detail:\${id}\`)`.
 export async function getClusterDetail(
   id: string
 ): Promise<ClusterDetail | null> {
-  let wrapped = wrapperById.get(id);
-  if (!wrapped) {
-    wrapped = unstable_cache(
-      async (clusterId: string): Promise<ClusterDetail | null> =>
-        fetchClusterDetail(clusterId),
-      ["cluster-detail", id],
-      {
-        revalidate: 30,
-        tags: [`cluster-detail:${id}`, "clusters"],
-      }
-    );
-    wrapperById.set(id, wrapped);
-  }
-  return wrapped(id);
+  "use cache";
+  cacheLife("cluster-feed");
+  cacheTag(`cluster-detail:${id}`, "clusters");
+  return fetchClusterDetail(id);
 }

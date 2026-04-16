@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { unstable_cache } from "next/cache";
+import { cacheLife, cacheTag } from "next/cache";
+import { connection } from "next/server";
 
 import { PageHero } from "@/components/ui/page-hero";
 import { BiasBadge } from "@/components/story/bias-badge";
@@ -28,8 +29,6 @@ import type { BiasCategory, Source } from "@/types";
 // only needs to feel "fresh", not real-time. The route segment `revalidate`
 // below layers ISR on top so cold renders are also bounded.
 
-export const revalidate = 300;
-
 interface SourceRow extends Source {
   articleCount7d: number;
   lastPublishedAt: string | null;
@@ -52,86 +51,87 @@ function emptyGrouped(): GroupedSources {
   };
 }
 
-const getSources = unstable_cache(
-  async (): Promise<GroupedSources> => {
-    const supabase = createServerClient();
+async function getSources(): Promise<GroupedSources> {
+  "use cache";
+  cacheLife("source-directory");
+  cacheTag("sources");
 
-    // Window: last 7 days, anchored to "now" at cache-fill time. The 5-minute
-    // unstable_cache TTL means the window can drift by up to 5 minutes between
-    // refreshes — well within the resolution of "haftalık aktivite".
-    const sevenDaysAgo = new Date(
-      Date.now() - 7 * 24 * 60 * 60 * 1000,
-    ).toISOString();
+  const supabase = createServerClient();
 
-    // Fire both round-trips in parallel: the activity rollup never depends
-    // on the source list (we group by source_id either way).
-    const [sourcesResult, activityResult] = await Promise.all([
-      supabase
-        .from("sources")
-        .select("id, name, slug, url, rss_url, bias, logo_url, active")
-        .eq("active", true)
-        .order("name", { ascending: true }),
-      supabase
-        .from("articles")
-        .select("source_id, published_at")
-        .gte("published_at", sevenDaysAgo),
-    ]);
+  // Window: last 7 days, anchored to "now" at cache-fill time. The 5-minute
+  // cache TTL means the window can drift by up to 5 minutes between
+  // refreshes — well within the resolution of "haftalık aktivite".
+  const sevenDaysAgo = new Date(
+    Date.now() - 7 * 24 * 60 * 60 * 1000,
+  ).toISOString();
 
-    if (sourcesResult.error) {
-      throw new Error(
-        `sources query failed: ${sourcesResult.error.message}`,
-      );
+  // Fire both round-trips in parallel: the activity rollup never depends
+  // on the source list (we group by source_id either way).
+  const [sourcesResult, activityResult] = await Promise.all([
+    supabase
+      .from("sources")
+      .select("id, name, slug, url, rss_url, bias, logo_url, active")
+      .eq("active", true)
+      .order("name", { ascending: true }),
+    supabase
+      .from("articles")
+      .select("source_id, published_at")
+      .gte("published_at", sevenDaysAgo),
+  ]);
+
+  if (sourcesResult.error) {
+    throw new Error(
+      `sources query failed: ${sourcesResult.error.message}`,
+    );
+  }
+  if (activityResult.error) {
+    throw new Error(
+      `activity query failed: ${activityResult.error.message}`,
+    );
+  }
+
+  const sourceRows = (sourcesResult.data ?? []) as Source[];
+  const activityRows = (activityResult.data ?? []) as Array<{
+    source_id: string;
+    published_at: string;
+  }>;
+
+  // In-memory rollup. One pass over the activity rows, two writes per row
+  // (count++, max(published_at)). O(n) where n = articles in the last week.
+  const counts = new Map<string, number>();
+  const lastSeen = new Map<string, string>();
+  for (const row of activityRows) {
+    counts.set(row.source_id, (counts.get(row.source_id) ?? 0) + 1);
+    const prev = lastSeen.get(row.source_id);
+    if (!prev || row.published_at > prev) {
+      lastSeen.set(row.source_id, row.published_at);
     }
-    if (activityResult.error) {
-      throw new Error(
-        `activity query failed: ${activityResult.error.message}`,
-      );
-    }
+  }
 
-    const sourceRows = (sourcesResult.data ?? []) as Source[];
-    const activityRows = (activityResult.data ?? []) as Array<{
-      source_id: string;
-      published_at: string;
-    }>;
+  // Group sources by bias. Unknown bias values (shouldn't happen — DB has
+  // a CHECK constraint — but we narrow defensively) are dropped silently.
+  const grouped = emptyGrouped();
+  for (const source of sourceRows) {
+    const bias = source.bias as BiasCategory;
+    if (!(bias in grouped)) continue;
+    grouped[bias].push({
+      ...source,
+      articleCount7d: counts.get(source.id) ?? 0,
+      lastPublishedAt: lastSeen.get(source.id) ?? null,
+    });
+  }
 
-    // In-memory rollup. One pass over the activity rows, two writes per row
-    // (count++, max(published_at)). O(n) where n = articles in the last week.
-    const counts = new Map<string, number>();
-    const lastSeen = new Map<string, string>();
-    for (const row of activityRows) {
-      counts.set(row.source_id, (counts.get(row.source_id) ?? 0) + 1);
-      const prev = lastSeen.get(row.source_id);
-      if (!prev || row.published_at > prev) {
-        lastSeen.set(row.source_id, row.published_at);
-      }
-    }
+  // Within each bias bucket, surface the most-active sources first; ties
+  // fall back to alphabetical (already pre-sorted by the SQL ORDER BY).
+  for (const bias of BIAS_ORDER) {
+    grouped[bias].sort((a, b) => b.articleCount7d - a.articleCount7d);
+  }
 
-    // Group sources by bias. Unknown bias values (shouldn't happen — DB has
-    // a CHECK constraint — but we narrow defensively) are dropped silently.
-    const grouped = emptyGrouped();
-    for (const source of sourceRows) {
-      const bias = source.bias as BiasCategory;
-      if (!(bias in grouped)) continue;
-      grouped[bias].push({
-        ...source,
-        articleCount7d: counts.get(source.id) ?? 0,
-        lastPublishedAt: lastSeen.get(source.id) ?? null,
-      });
-    }
-
-    // Within each bias bucket, surface the most-active sources first; ties
-    // fall back to alphabetical (already pre-sorted by the SQL ORDER BY).
-    for (const bias of BIAS_ORDER) {
-      grouped[bias].sort((a, b) => b.articleCount7d - a.articleCount7d);
-    }
-
-    return grouped;
-  },
-  ["sources-directory-v1"],
-  { revalidate: 300, tags: ["sources"] },
-);
+  return grouped;
+}
 
 export default async function SourcesPage() {
+  await connection();
   const grouped = await getSources();
 
   const totalSources = BIAS_ORDER.reduce(

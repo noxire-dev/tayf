@@ -1,0 +1,1082 @@
+{
+  "project": {
+    "name": "tayf",
+    "summary": "Tayf is a Turkish news media bias analysis platform that aggregates RSS feeds from 144 Turkish news outlets, clusters related articles together, and surfaces media bias distribution, blindspots (stories covered by only one political side), and cross-spectrum surprises. It maps each source to a political zone (iktidar/bagimsiz/muhalefet) and provides visual bias spectrum breakdowns, factuality ratings, and ownership lineage for each source.",
+    "language": "TypeScript",
+    "runtime": "Node.js (Next.js 16)",
+    "framework": "Next.js 16 (App Router with Cache Components/PPR)",
+    "packageManager": "npm"
+  },
+  "architecture": {
+    "pattern": "Next.js App Router with Server Components, API routes for admin/cron/health, Supabase as the database layer, and an external RSS worker for continuous ingestion. Uses Cache Components (use cache directive) for data fetching with tag-based invalidation.",
+    "entryPoints": [
+      "src/app/layout.tsx",
+      "src/app/page.tsx"
+    ],
+    "keyModules": [
+      {
+        "path": "src/lib/clusters/politics-query.ts",
+        "purpose": "Fetches, filters, deduplicates, wire-collapses, and importance-ranks politics clusters for the homepage",
+        "exports": [
+          "getPoliticsClusters",
+          "ClusterBundle",
+          "PoliticsClustersResult"
+        ]
+      },
+      {
+        "path": "src/lib/clusters/cluster-detail-query.ts",
+        "purpose": "Fetches a single cluster with its member articles and all sources for the detail page",
+        "exports": [
+          "getClusterDetail",
+          "ClusterDetail",
+          "ClusterDetailMember"
+        ]
+      },
+      {
+        "path": "src/lib/bias/config.ts",
+        "purpose": "Single source of truth for all bias labels, colors, spectrum ordering, and zone mapping (10 bias categories to 3 Medya DNA zones)",
+        "exports": [
+          "BIAS_LABELS",
+          "BIAS_SHORT_LABELS",
+          "BIAS_COLORS",
+          "BIAS_ORDER",
+          "BIAS_TO_ZONE",
+          "ZONE_META",
+          "zoneOf"
+        ]
+      },
+      {
+        "path": "src/lib/bias/cross-spectrum.ts",
+        "purpose": "Detects cross-spectrum surprise outlets in a cluster (e.g., opposition outlet covering an iktidar-dominant story)",
+        "exports": [
+          "detectCrossSpectrum",
+          "summarizeSurprises",
+          "CrossSpectrumResult"
+        ]
+      },
+      {
+        "path": "src/lib/rss/fetcher.ts",
+        "purpose": "Fetches RSS feeds from all active sources in parallel with per-source header overrides",
+        "exports": [
+          "fetchAllFeeds",
+          "RawFeedItem",
+          "FetchResult"
+        ]
+      },
+      {
+        "path": "src/lib/rss/normalize.ts",
+        "purpose": "Normalizes raw RSS items into articles with category classification, image extraction, and content hashing",
+        "exports": [
+          "normalizeArticles",
+          "NormalizedArticle"
+        ]
+      },
+      {
+        "path": "src/lib/sources/factuality.ts",
+        "purpose": "Hand-tagged factuality ratings and ownership metadata for ~30 major Turkish outlets",
+        "exports": [
+          "getSourceMetadata",
+          "SOURCE_METADATA",
+          "Factuality",
+          "SourceFactualityMetadata"
+        ]
+      },
+      {
+        "path": "src/types/index.ts",
+        "purpose": "Core type definitions for the entire app: BiasCategory, MediaDnaZone, Source, Article, Cluster, NewsCategory",
+        "exports": [
+          "BiasCategory",
+          "MediaDnaZone",
+          "Source",
+          "Article",
+          "Cluster",
+          "BiasDistribution",
+          "NewsCategory",
+          "Stance"
+        ]
+      },
+      {
+        "path": "src/components/story/cluster-card.tsx",
+        "purpose": "Main presentational card component for rendering a cluster with hero image, bias spectrum, and member article previews",
+        "exports": [
+          "ClusterCard",
+          "ClusterCardCluster",
+          "ClusterCardArticle",
+          "ClusterCardSource"
+        ]
+      }
+    ],
+    "dataFlow": "RSS feeds are ingested by an external tmux worker (primary) or the /api/cron/ingest endpoint (fallback), normalized and upserted into Supabase's articles table. A separate cluster-worker groups related articles into clusters. The frontend fetches clusters via PostgREST embedded selects, filters for politics, applies wire-collapse/source-fairness/importance-ranking, and renders through Server Components with 30s cache TTL."
+  },
+  "files": [
+    {
+      "path": "src/app/page.tsx",
+      "purpose": "Homepage rendering paginated, time-bucketed politics cluster feed with search filtering",
+      "exports": [
+        "default (HomePage)"
+      ],
+      "dependencies": [
+        "@/components/filters/search-bar",
+        "@/components/story/cluster-card",
+        "@/components/ui/page-hero",
+        "@/lib/clusters/politics-query"
+      ],
+      "keyFunctions": [
+        {
+          "name": "HomePage",
+          "purpose": "Server Component that fetches clusters, applies search/pagination, groups by time buckets",
+          "signature": "HomePage({ searchParams }): Promise<JSX.Element>"
+        }
+      ]
+    },
+    {
+      "path": "src/app/blindspots/page.tsx",
+      "purpose": "Blindspots page showing clusters where 80%+ of sources are from a single political zone",
+      "exports": [
+        "default (BlindspotsPage)"
+      ],
+      "dependencies": [
+        "@/components/story/cluster-card",
+        "@/components/ui/page-hero",
+        "@/lib/bias/analyzer",
+        "@/lib/bias/config",
+        "@/lib/supabase/server"
+      ],
+      "keyFunctions": [
+        {
+          "name": "fetchBlindspots",
+          "purpose": "Queries clusters and filters for lopsided zone coverage with wire-dedup, SEO filter, dunya guard, and 24h delay",
+          "signature": "fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }>"
+        }
+      ]
+    },
+    {
+      "path": "src/app/cluster/[id]/page.tsx",
+      "purpose": "Cluster detail page with hero image, bias spectrum, cross-spectrum surprises, stance chart, and MediaDNA grid",
+      "exports": [
+        "default (ClusterDetailPage)",
+        "generateMetadata"
+      ],
+      "dependencies": [
+        "@/components/story/bias-spectrum",
+        "@/components/story/cluster-card-image",
+        "@/components/story/media-dna",
+        "@/components/story/cluster-stance",
+        "@/components/story/cross-spectrum-caption",
+        "@/components/story/share-button",
+        "@/components/source/source-chips",
+        "@/lib/sources/factuality",
+        "@/lib/bias/cross-spectrum",
+        "@/lib/clusters/cluster-detail-query",
+        "@/lib/time"
+      ],
+      "keyFunctions": [
+        {
+          "name": "ClusterDetailPage",
+          "purpose": "Renders full cluster detail with hero, spectrum, surprises, stance chart, and MediaDNA",
+          "signature": "ClusterDetailPage({ params }): Promise<JSX.Element>"
+        },
+        {
+          "name": "generateMetadata",
+          "purpose": "Dynamic SEO metadata with OG tags for the cluster",
+          "signature": "generateMetadata({ params }): Promise<Metadata>"
+        }
+      ]
+    },
+    {
+      "path": "src/app/cluster/[id]/opengraph-image.tsx",
+      "purpose": "Generates OG card image for cluster pages using Satori/ImageResponse with zone breakdown bar",
+      "exports": [
+        "default (Image)",
+        "alt",
+        "size",
+        "contentType"
+      ],
+      "dependencies": [
+        "next/og",
+        "@/lib/clusters/cluster-detail-query",
+        "@/lib/bias/config"
+      ],
+      "keyFunctions": [
+        {
+          "name": "Image",
+          "purpose": "Renders a 1200x630 PNG OG card with cluster title and zone distribution",
+          "signature": "Image({ params }): Promise<ImageResponse>"
+        }
+      ]
+    },
+    {
+      "path": "src/app/sources/page.tsx",
+      "purpose": "Source directory listing all 144 active sources grouped by bias category with 7-day activity counts",
+      "exports": [
+        "default (SourcesPage)"
+      ],
+      "dependencies": [
+        "@/components/ui/page-hero",
+        "@/components/story/bias-badge",
+        "@/lib/bias/config",
+        "@/lib/time",
+        "@/lib/supabase/server"
+      ],
+      "keyFunctions": [
+        {
+          "name": "getSources",
+          "purpose": "Fetches all active sources with 7-day article counts, grouped by bias",
+          "signature": "getSources(): Promise<GroupedSources>"
+        }
+      ]
+    },
+    {
+      "path": "src/app/source/[slug]/page.tsx",
+      "purpose": "Single source profile page with bias badge, 7-day article count, and 20 most recent articles",
+      "exports": [
+        "default (SourceProfilePage)",
+        "generateMetadata"
+      ],
+      "dependencies": [
+        "@/components/story/bias-badge",
+        "@/lib/bias/config",
+        "@/lib/time",
+        "@/lib/supabase/server"
+      ],
+      "keyFunctions": [
+        {
+          "name": "getSourceProfile",
+          "purpose": "Fetches source row, 7-day count, and 20 recent articles with cache",
+          "signature": "getSourceProfile(slug: string): Promise<SourceProfile | null>"
+        }
+      ]
+    },
+    {
+      "path": "src/app/timeline/page.tsx",
+      "purpose": "Chronological timeline of clusters from the last 24 hours, grouped by hour",
+      "exports": [
+        "default (TimelinePage)"
+      ],
+      "dependencies": [
+        "@/components/ui/page-hero",
+        "@/lib/supabase/server"
+      ],
+      "keyFunctions": [
+        {
+          "name": "getRecentClusters",
+          "purpose": "Fetches last 24h clusters ordered by first_published",
+          "signature": "getRecentClusters(): Promise<ClusterRow[]>"
+        },
+        {
+          "name": "bucketByHour",
+          "purpose": "Groups cluster rows into hour-based buckets",
+          "signature": "bucketByHour(rows: ClusterRow[]): HourBucket[]"
+        }
+      ]
+    },
+    {
+      "path": "src/app/trends/page.tsx",
+      "purpose": "30-day historical Medya DNA trend chart as stacked SVG bars showing zone distribution per day",
+      "exports": [
+        "default (TrendsPage)"
+      ],
+      "dependencies": [
+        "@/components/ui/page-hero",
+        "@/lib/bias/config",
+        "@/lib/supabase/server"
+      ],
+      "keyFunctions": [
+        {
+          "name": "fetchTimeline",
+          "purpose": "Paginates through 30 days of articles to build per-day zone histograms",
+          "signature": "fetchTimeline(): Promise<DayBucket[]>"
+        },
+        {
+          "name": "bucketByDay",
+          "purpose": "Folds article rows into contiguous 30-day zone-count buckets",
+          "signature": "bucketByDay(rows: ArticleRow[]): DayBucket[]"
+        }
+      ]
+    },
+    {
+      "path": "src/app/saved/page.tsx",
+      "purpose": "Client-side bookmarks page using localStorage-backed useBookmarks hook",
+      "exports": [
+        "default (SavedPage)"
+      ],
+      "dependencies": [
+        "@/components/bookmark/use-bookmarks"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/app/admin/page.tsx",
+      "purpose": "Admin panel for managing sources, triggering ingestion, backfilling images, and nuking data",
+      "exports": [
+        "default (AdminPage)"
+      ],
+      "dependencies": [
+        "@/components/admin/stats-grid",
+        "@/components/admin/worker-stats",
+        "@/components/admin/quick-actions-card",
+        "@/components/admin/source-row",
+        "@/components/admin/source-dialog",
+        "@/components/admin/action-result-banner"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/app/api/admin/route.ts",
+      "purpose": "Admin API: GET returns stats, POST handles actions (ingest, backfill, nuke, source CRUD)",
+      "exports": [
+        "GET",
+        "POST"
+      ],
+      "dependencies": [
+        "@/lib/supabase/server",
+        "@/lib/api/errors",
+        "@/lib/rate-limit"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/app/api/cron/ingest/route.ts",
+      "purpose": "Fallback/manual RSS ingest endpoint with worker-active detection (30s recent-insert check)",
+      "exports": [
+        "GET"
+      ],
+      "dependencies": [
+        "@/lib/supabase/server",
+        "@/lib/rss/fetcher",
+        "@/lib/rss/normalize",
+        "@/lib/rss/og-image",
+        "@/lib/api/errors",
+        "@/lib/rate-limit"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/app/api/cron/backfill-images/route.ts",
+      "purpose": "Backfills og:image for articles missing cover images, processing 30 at a time with concurrency 5",
+      "exports": [
+        "GET"
+      ],
+      "dependencies": [
+        "@/lib/supabase/server",
+        "@/lib/rss/og-image",
+        "@/lib/api/errors",
+        "@/lib/rate-limit"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/app/api/health/route.ts",
+      "purpose": "Health check endpoint with DB, env, and ingestion staleness checks (2s timeout per subsystem)",
+      "exports": [
+        "GET"
+      ],
+      "dependencies": [
+        "@/lib/supabase/server"
+      ],
+      "keyFunctions": [
+        {
+          "name": "withTimeout",
+          "purpose": "Races a promise against a timer to prevent hung subsystem checks",
+          "signature": "withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<Result>"
+        }
+      ]
+    },
+    {
+      "path": "src/app/api/metrics/route.ts",
+      "purpose": "Metrics endpoint returning article/cluster/source counts for the admin dashboard",
+      "exports": [
+        "GET"
+      ],
+      "dependencies": [
+        "@/lib/supabase/server"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/app/api/newsletter/route.ts",
+      "purpose": "Newsletter signup endpoint with email validation and duplicate-safe upsert",
+      "exports": [
+        "POST"
+      ],
+      "dependencies": [
+        "@/lib/supabase/server",
+        "@/lib/api/errors",
+        "@/lib/rate-limit"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/lib/clusters/politics-query.ts",
+      "purpose": "Core homepage data fetcher: single PostgREST embedded select, politics filter, source dedupe, wire-collapse, source-fairness cap, importance ranking",
+      "exports": [
+        "getPoliticsClusters",
+        "ClusterBundle",
+        "PoliticsClustersResult"
+      ],
+      "dependencies": [
+        "@/components/story/cluster-card",
+        "@/lib/bias/analyzer",
+        "@/lib/bias/config",
+        "@/lib/supabase/server"
+      ],
+      "keyFunctions": [
+        {
+          "name": "getPoliticsClusters",
+          "purpose": "Cached entry point wrapping fetchPoliticsClusters with 30s TTL",
+          "signature": "getPoliticsClusters(): Promise<PoliticsClustersResult>"
+        },
+        {
+          "name": "fetchPoliticsClusters",
+          "purpose": "Fetches 200 candidates, filters for politics majority, dedupes, wire-collapses, ranks by importance",
+          "signature": "fetchPoliticsClusters(): Promise<PoliticsClustersResult>"
+        },
+        {
+          "name": "scoreCluster",
+          "purpose": "Importance score combining article count, zone diversity, time decay, dominance penalty, velocity",
+          "signature": "scoreCluster(bundle: ClusterBundle, members: EmbeddedArticle[]): number"
+        },
+        {
+          "name": "detectWireRedistribution",
+          "purpose": "Detects wire-copy clusters via content_hash uniqueness ratio",
+          "signature": "detectWireRedistribution(members): WireDetectionResult"
+        },
+        {
+          "name": "applySourceFairnessCap",
+          "purpose": "Caps any single source at 10% of cluster article count",
+          "signature": "applySourceFairnessCap(members): { effectiveCount, cappedSources }"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/clusters/cluster-detail-query.ts",
+      "purpose": "Fetches a single cluster with members and all sources via two parallel PostgREST calls, with source dedupe and neutral headline coalescing",
+      "exports": [
+        "getClusterDetail",
+        "ClusterDetail",
+        "ClusterDetailMember"
+      ],
+      "dependencies": [
+        "@/lib/bias/analyzer",
+        "@/lib/supabase/server"
+      ],
+      "keyFunctions": [
+        {
+          "name": "getClusterDetail",
+          "purpose": "Cached entry point for cluster detail, tagged per cluster ID",
+          "signature": "getClusterDetail(id: string): Promise<ClusterDetail | null>"
+        },
+        {
+          "name": "fetchClusterDetail",
+          "purpose": "Two parallel round-trips: cluster+members embedded select and full sources directory",
+          "signature": "fetchClusterDetail(id: string): Promise<ClusterDetail | null>"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/bias/config.ts",
+      "purpose": "Single source of truth for all bias configuration: labels, colors, spectrum order, zone mapping, and zone presentation tokens",
+      "exports": [
+        "BIAS_LABELS",
+        "BIAS_SHORT_LABELS",
+        "BIAS_COLORS",
+        "BIAS_ORDER",
+        "BIAS_TO_ZONE",
+        "ZONE_META",
+        "zoneOf",
+        "BiasColor"
+      ],
+      "dependencies": [
+        "@/types"
+      ],
+      "keyFunctions": [
+        {
+          "name": "zoneOf",
+          "purpose": "Maps a BiasCategory to its MediaDnaZone",
+          "signature": "zoneOf(bias: BiasCategory): MediaDnaZone"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/bias/analyzer.ts",
+      "purpose": "Utility functions for bias distribution calculation and blindspot detection",
+      "exports": [
+        "emptyBiasDistribution",
+        "calculateBiasDistribution",
+        "detectBlindspot"
+      ],
+      "dependencies": [
+        "@/types"
+      ],
+      "keyFunctions": [
+        {
+          "name": "emptyBiasDistribution",
+          "purpose": "Returns a zeroed BiasDistribution object",
+          "signature": "emptyBiasDistribution(): BiasDistribution"
+        },
+        {
+          "name": "calculateBiasDistribution",
+          "purpose": "Counts bias category occurrences into a distribution",
+          "signature": "calculateBiasDistribution(biasLabels: BiasCategory[]): BiasDistribution"
+        },
+        {
+          "name": "detectBlindspot",
+          "purpose": "Checks if only one bias category covers a story",
+          "signature": "detectBlindspot(distribution: BiasDistribution): { isBlindspot, blindspotSide }"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/bias/cross-spectrum.ts",
+      "purpose": "Detects cross-spectrum coverage surprises: outlets from the opposite zone covering a dominant-zone story",
+      "exports": [
+        "detectCrossSpectrum",
+        "summarizeSurprises",
+        "CrossSpectrumResult"
+      ],
+      "dependencies": [
+        "@/lib/bias/config"
+      ],
+      "keyFunctions": [
+        {
+          "name": "detectCrossSpectrum",
+          "purpose": "Finds dominant zone and opposite-zone surprise outlets with minimum source/margin guards",
+          "signature": "detectCrossSpectrum(memberSources: Source[], dominantThreshold?: number): CrossSpectrumResult"
+        },
+        {
+          "name": "summarizeSurprises",
+          "purpose": "Renders Turkish blurbs for surprise outlets",
+          "signature": "summarizeSurprises(result: CrossSpectrumResult, clusterTitle: string, max?: number): string[]"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/bias/cross-spectrum.test.ts",
+      "purpose": "Vitest tests for cross-spectrum detection: balanced clusters, dominant clusters, threshold behavior, blindspot candidates, summary rendering",
+      "exports": [],
+      "dependencies": [
+        "vitest",
+        "./cross-spectrum"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/lib/rss/fetcher.ts",
+      "purpose": "Parallel RSS feed fetcher with per-source header overrides and 15s timeout",
+      "exports": [
+        "fetchAllFeeds",
+        "RawFeedItem",
+        "FetchResult"
+      ],
+      "dependencies": [
+        "rss-parser",
+        "@/types"
+      ],
+      "keyFunctions": [
+        {
+          "name": "fetchAllFeeds",
+          "purpose": "Fetches all source RSS feeds in parallel via Promise.allSettled",
+          "signature": "fetchAllFeeds(sources: Source[]): Promise<FetchResult[]>"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/rss/normalize.ts",
+      "purpose": "Normalizes raw RSS items into structured articles with URL normalization, HTML entity decoding, image extraction, content hashing, and keyword-based category classification",
+      "exports": [
+        "normalizeArticles",
+        "NormalizedArticle"
+      ],
+      "dependencies": [
+        "crypto-js/sha256",
+        "@/types",
+        "./fetcher"
+      ],
+      "keyFunctions": [
+        {
+          "name": "normalizeArticles",
+          "purpose": "Batch normalizes RSS items for a source",
+          "signature": "normalizeArticles(source: Source, items: RawFeedItem[]): NormalizedArticle[]"
+        },
+        {
+          "name": "classifyCategory",
+          "purpose": "Keyword + URL-based Turkish news category classification",
+          "signature": "classifyCategory(title, description, url): NewsCategory"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/rss/og-image.ts",
+      "purpose": "Fetches og:image meta tags from article URLs as fallback image extraction",
+      "exports": [
+        "fetchOgImage",
+        "batchFetchOgImages"
+      ],
+      "dependencies": [],
+      "keyFunctions": [
+        {
+          "name": "fetchOgImage",
+          "purpose": "Fetches first 50KB of an article page and extracts og:image",
+          "signature": "fetchOgImage(url: string): Promise<string | null>"
+        },
+        {
+          "name": "batchFetchOgImages",
+          "purpose": "Batch fetches og:image for articles missing images with concurrency 5",
+          "signature": "batchFetchOgImages(articles): Promise<Map<string, string>>"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/sources/factuality.ts",
+      "purpose": "Hand-tagged factuality (high/mixed/low) and ownership metadata for ~30 major Turkish news outlets",
+      "exports": [
+        "getSourceMetadata",
+        "SOURCE_METADATA",
+        "Factuality",
+        "SourceFactualityMetadata"
+      ],
+      "dependencies": [],
+      "keyFunctions": [
+        {
+          "name": "getSourceMetadata",
+          "purpose": "Looks up factuality/ownership for a source slug, returns null if untagged",
+          "signature": "getSourceMetadata(slug: string): SourceFactualityMetadata | null"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/supabase/server.ts",
+      "purpose": "Creates a Supabase service-role client for server-side data access",
+      "exports": [
+        "createServerClient"
+      ],
+      "dependencies": [
+        "@supabase/supabase-js"
+      ],
+      "keyFunctions": [
+        {
+          "name": "createServerClient",
+          "purpose": "Creates authenticated Supabase client using service role key",
+          "signature": "createServerClient(): SupabaseClient"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/rate-limit.ts",
+      "purpose": "In-memory token-bucket rate limiter with periodic cleanup for API routes",
+      "exports": [
+        "createRateLimiter",
+        "clientKey"
+      ],
+      "dependencies": [],
+      "keyFunctions": [
+        {
+          "name": "createRateLimiter",
+          "purpose": "Creates a named rate limiter with configurable capacity and refill rate",
+          "signature": "createRateLimiter(name: string, opts: RateLimiterOptions): (key: string) => { allowed, retryAfterMs }"
+        },
+        {
+          "name": "clientKey",
+          "purpose": "Extracts client IP from x-forwarded-for/x-real-ip headers",
+          "signature": "clientKey(req: Request): string"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/api/errors.ts",
+      "purpose": "Canonical API error response helpers and withApiErrors wrapper for consistent error handling",
+      "exports": [
+        "apiError",
+        "apiUnauthorized",
+        "apiBadRequest",
+        "apiNotFound",
+        "apiServerError",
+        "withApiErrors",
+        "ApiError"
+      ],
+      "dependencies": [
+        "next/server"
+      ],
+      "keyFunctions": [
+        {
+          "name": "withApiErrors",
+          "purpose": "Wraps route handlers to catch thrown errors as 500 JSON responses",
+          "signature": "withApiErrors<T>(handler: T): T"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/time.ts",
+      "purpose": "Pure Turkish relative time formatter (az once, N dakika once, N saat once, etc.)",
+      "exports": [
+        "formatTurkishTimeAgo"
+      ],
+      "dependencies": [],
+      "keyFunctions": [
+        {
+          "name": "formatTurkishTimeAgo",
+          "purpose": "Formats ISO date as Turkish relative time string",
+          "signature": "formatTurkishTimeAgo(dateISO: string): string"
+        }
+      ]
+    },
+    {
+      "path": "src/lib/utils.ts",
+      "purpose": "Shared utilities: Tailwind class merger (cn) and a simple timeAgo formatter",
+      "exports": [
+        "cn",
+        "timeAgo"
+      ],
+      "dependencies": [
+        "clsx",
+        "tailwind-merge"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/types/index.ts",
+      "purpose": "Core TypeScript type definitions for the entire application",
+      "exports": [
+        "BiasCategory",
+        "MediaDnaZone",
+        "Stance",
+        "NewsCategory",
+        "NEWS_CATEGORIES",
+        "Source",
+        "Article",
+        "BiasDistribution",
+        "Cluster",
+        "Story",
+        "StoryStance",
+        "StoryWithStances"
+      ],
+      "dependencies": [],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/story/cluster-card.tsx",
+      "purpose": "Server Component card for a cluster: hero image, title, bias spectrum, member article preview, blindspot badge",
+      "exports": [
+        "ClusterCard",
+        "ClusterCardCluster",
+        "ClusterCardArticle",
+        "ClusterCardSource"
+      ],
+      "dependencies": [
+        "@/components/story/bias-spectrum",
+        "@/components/story/cluster-card-image",
+        "@/lib/bias/config",
+        "@/lib/time"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/story/cluster-card-image.tsx",
+      "purpose": "Client Component for cluster hero images with multi-candidate fallback chain (article images, source logo, placeholder)",
+      "exports": [
+        "ClusterCardImage"
+      ],
+      "dependencies": [
+        "next/image",
+        "lucide-react"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/story/bias-spectrum.tsx",
+      "purpose": "Renders horizontal bias distribution bar with legend in full (10-category) or compact (3-zone) mode",
+      "exports": [
+        "BiasSpectrum",
+        "BIAS_BADGE_CONFIG"
+      ],
+      "dependencies": [
+        "@/lib/bias/config",
+        "./bias-badge"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/story/media-dna.tsx",
+      "purpose": "Client Component showing all 144 sources bucketed by zone with a proportional bar and highlight/dim toggle",
+      "exports": [
+        "MediaDna"
+      ],
+      "dependencies": [
+        "@/lib/bias/config"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/story/cluster-stance.tsx",
+      "purpose": "Groups cluster member articles by Medya DNA zone with source chips for each article",
+      "exports": [
+        "ClusterStance"
+      ],
+      "dependencies": [
+        "@/lib/bias/config",
+        "@/components/story/source-chip"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/story/source-chip.tsx",
+      "purpose": "Shared Server Component primitive for zone-tinted source name chips with optional title and external link",
+      "exports": [
+        "SourceChip",
+        "SourceChipProps"
+      ],
+      "dependencies": [
+        "@/lib/bias/config",
+        "lucide-react"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/story/bias-badge.tsx",
+      "purpose": "Renders a small badge with the Turkish bias label and zone-appropriate color",
+      "exports": [
+        "BiasBadge",
+        "BIAS_BADGE_CONFIG"
+      ],
+      "dependencies": [
+        "@/components/ui/badge",
+        "@/lib/bias/config"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/story/cross-spectrum-caption.tsx",
+      "purpose": "Renders yellow-tinted surprise caption box for cross-spectrum coverage detections",
+      "exports": [
+        "CrossSpectrumCaption"
+      ],
+      "dependencies": [
+        "lucide-react"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/story/share-button.tsx",
+      "purpose": "Client Component share button with native share API and clipboard fallback",
+      "exports": [
+        "ShareButton"
+      ],
+      "dependencies": [
+        "lucide-react"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/source/source-chips.tsx",
+      "purpose": "Server Component rendering factuality and ownership chips for a source slug",
+      "exports": [
+        "SourceChips",
+        "SourceChipsProps"
+      ],
+      "dependencies": [
+        "@/lib/sources/factuality",
+        "@/lib/utils"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/filters/search-bar.tsx",
+      "purpose": "Client Component search input with / keyboard shortcut and 300ms debounced URL update",
+      "exports": [
+        "SearchBar"
+      ],
+      "dependencies": [
+        "next/navigation"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/bookmark/use-bookmarks.ts",
+      "purpose": "Client-side bookmark hook using localStorage + useSyncExternalStore with cross-tab sync",
+      "exports": [
+        "useBookmarks"
+      ],
+      "dependencies": [
+        "react"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/kbd-shortcuts.tsx",
+      "purpose": "Global keyboard shortcut handler (g+h/g+b/g+s/g+a navigation, ? help modal)",
+      "exports": [
+        "KbdShortcuts"
+      ],
+      "dependencies": [
+        "next/navigation"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/layout/header.tsx",
+      "purpose": "Sticky header with spectrum logo mark, Tayf branding, and navigation links",
+      "exports": [
+        "Header"
+      ],
+      "dependencies": [
+        "@/components/ui/separator",
+        "@/components/layout/nav-links"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/layout/footer.tsx",
+      "purpose": "Site footer with brand block, navigation links, and RSS link",
+      "exports": [
+        "Footer"
+      ],
+      "dependencies": [],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/layout/nav-links.tsx",
+      "purpose": "Client Component nav links with active-route highlighting",
+      "exports": [
+        "NavLinks"
+      ],
+      "dependencies": [
+        "next/navigation",
+        "@/components/ui/separator"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/ui/page-hero.tsx",
+      "purpose": "Editorial masthead component with kicker, title, and subtitle",
+      "exports": [
+        "PageHero"
+      ],
+      "dependencies": [],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/components/admin/bias-map.ts",
+      "purpose": "Adapter reshaping BIAS_COLORS/BIAS_LABELS into admin-specific pill/dot classes for dark-only UI",
+      "exports": [
+        "BIAS_MAP",
+        "biasColor",
+        "biasLabel",
+        "BiasMeta"
+      ],
+      "dependencies": [
+        "@/lib/bias/config"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "next.config.ts",
+      "purpose": "Next.js 16 config with Cache Components, cache life profiles, wildcard image remotePatterns, CSP headers, and logging config",
+      "exports": [
+        "default (nextConfig)"
+      ],
+      "dependencies": [],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/app/layout.tsx",
+      "purpose": "Root layout with DM Serif Display + Plus Jakarta Sans + JetBrains Mono fonts, dark mode, SEO metadata, Header, Footer, and KbdShortcuts",
+      "exports": [
+        "default (RootLayout)",
+        "metadata",
+        "viewport"
+      ],
+      "dependencies": [
+        "next/font/google",
+        "@/components/layout/header",
+        "@/components/layout/footer",
+        "@/components/kbd-shortcuts"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/app/sitemap.ts",
+      "purpose": "Dynamic sitemap with static routes and top 1000 clusters including Google image-sitemap extension",
+      "exports": [
+        "default (sitemap)"
+      ],
+      "dependencies": [
+        "@/lib/supabase/server"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "src/app/rss.xml/route.ts",
+      "purpose": "RSS 2.0 feed of top 30 politics clusters with Atom self-link",
+      "exports": [
+        "GET"
+      ],
+      "dependencies": [
+        "@/lib/clusters/politics-query"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "path": "vitest.config.ts",
+      "purpose": "Vitest configuration with @ path alias and Node environment",
+      "exports": [
+        "default"
+      ],
+      "dependencies": [
+        "vitest",
+        "path"
+      ],
+      "keyFunctions": []
+    }
+  ],
+  "dependencies": {
+    "production": {
+      "next": "Next.js 16 framework with App Router, Cache Components, and PPR",
+      "react": "React 19 UI library",
+      "@supabase/supabase-js": "Supabase client for PostgREST queries and database operations",
+      "rss-parser": "RSS/Atom feed parser with custom field support for media extensions",
+      "crypto-js": "SHA256 hashing for article content_hash generation",
+      "lucide-react": "Icon library used throughout the UI",
+      "@base-ui/react": "Headless UI primitives for Button, Dialog, Select, Separator, Input components",
+      "class-variance-authority": "Variant-based component styling for badge and button variants",
+      "clsx": "Conditional className utility",
+      "tailwind-merge": "Tailwind CSS class deduplication and merging",
+      "tw-animate-css": "Tailwind CSS animation utilities"
+    },
+    "development": {
+      "vitest": "Test framework for unit tests",
+      "typescript": "TypeScript compiler",
+      "tailwindcss": "Utility-first CSS framework (v4 with @theme inline)",
+      "@types/react": "React type definitions",
+      "@types/node": "Node.js type definitions"
+    }
+  },
+  "conventions": {
+    "config": "next.config.ts at root, vitest.config.ts at root, Tailwind configured inline via @theme in globals.css",
+    "output": ".next/ build output directory (standard Next.js)",
+    "testing": "Vitest with Node environment, tests colocated as *.test.ts files (e.g. src/lib/bias/cross-spectrum.test.ts), @ path alias configured",
+    "buildTool": "Next.js built-in compiler (SWC/Turbopack)"
+  },
+  "quickReference": {
+    "commands": {
+      "build": "next build",
+      "dev": "next dev",
+      "test": "vitest"
+    },
+    "envVars": [
+      "NEXT_PUBLIC_SUPABASE_URL",
+      "SUPABASE_SERVICE_ROLE_KEY",
+      "CRON_SECRET",
+      "NEXT_PUBLIC_SITE_URL"
+    ],
+    "importantPaths": {
+      "config": "next.config.ts",
+      "types": "src/types/index.ts",
+      "entry": "src/app/layout.tsx",
+      "biasConfig": "src/lib/bias/config.ts",
+      "politicsQuery": "src/lib/clusters/politics-query.ts",
+      "clusterDetailQuery": "src/lib/clusters/cluster-detail-query.ts",
+      "supabaseClient": "src/lib/supabase/server.ts",
+      "globalStyles": "src/app/globals.css"
+    }
+  }
+}

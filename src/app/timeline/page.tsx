@@ -1,3 +1,4 @@
+import { cacheLife, cacheTag } from "next/cache";
 import Link from "next/link";
 
 import { PageHero } from "@/components/ui/page-hero";
@@ -15,8 +16,6 @@ import { createServerClient } from "@/lib/supabase/server";
 // Cached at the route segment with `revalidate = 60` so the wall feels
 // near-live without slamming Supabase on every navigation. The 100-row
 // LIMIT keeps the payload bounded even on a busy news day.
-
-export const revalidate = 60;
 
 interface ClusterRow {
   id: string;
@@ -89,6 +88,10 @@ function bucketByHour(rows: ClusterRow[]): HourBucket[] {
 }
 
 async function getRecentClusters(): Promise<ClusterRow[]> {
+  "use cache";
+  cacheLife("cluster-feed");
+  cacheTag("clusters");
+
   const supabase = createServerClient();
 
   // Window: last 24 hours, anchored at request time. The 60-second segment

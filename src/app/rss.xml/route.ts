@@ -1,7 +1,5 @@
 import { getPoliticsClusters } from "@/lib/clusters/politics-query";
 
-export const revalidate = 300; // 5 minutes
-
 function escapeXml(str: string): string {
   return str
     .replace(/&/g, "&amp;")

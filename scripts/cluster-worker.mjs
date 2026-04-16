@@ -298,7 +298,7 @@ function registerNewClusterInCache(clusterId, seed) {
     id: clusterId,
     title_tr: seed.title,
     first_published: seed.published_at,
-    updated_at: new Date().toISOString(),
+    updated_at: seed.published_at,
     article_count: 1,
   });
 }
@@ -588,7 +588,11 @@ async function createCluster(sourceLookup, article) {
       blindspot_side,
       article_count: 1,
       first_published: article.published_at,
-      updated_at: new Date().toISOString(),
+      // Use the article's published_at so the cluster's freshness reflects
+      // when the news actually happened, not when the worker processed it.
+      // During normal continuous operation these are ~equal; during bulk
+      // backfill this prevents week-old stories from appearing "just updated".
+      updated_at: article.published_at,
     })
     .select("id")
     .single();
@@ -690,6 +694,11 @@ async function addArticleToCluster(sourceLookup, clusterId, article) {
   const firstPublishedIso = timestamps.length
     ? new Date(Math.min(...timestamps)).toISOString()
     : new Date().toISOString();
+  // Use the LATEST member article's published_at as the cluster's updated_at
+  // so freshness reflects actual news activity, not worker processing time.
+  const lastPublishedIso = timestamps.length
+    ? new Date(Math.max(...timestamps)).toISOString()
+    : new Date().toISOString();
 
   const updateRes = await supabase
     .from("clusters")
@@ -699,7 +708,7 @@ async function addArticleToCluster(sourceLookup, clusterId, article) {
       is_blindspot,
       blindspot_side,
       first_published: firstPublishedIso,
-      updated_at: new Date().toISOString(),
+      updated_at: lastPublishedIso,
     })
     .eq("id", clusterId);
   if (updateRes.error) throw new Error(`addArticle update: ${updateRes.error.message}`);

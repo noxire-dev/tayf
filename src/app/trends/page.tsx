@@ -1,3 +1,5 @@
+import { cacheLife } from "next/cache";
+
 import { PageHero } from "@/components/ui/page-hero";
 import { ZONE_META, zoneOf } from "@/lib/bias/config";
 import { createServerClient } from "@/lib/supabase/server";
@@ -16,8 +18,6 @@ import type { BiasCategory, MediaDnaZone } from "@/types";
 // fold the histogram in JS. Payload is small (~one row per article ≈ a few
 // thousand rows / month) and the whole page is wrapped in `revalidate=3600`
 // so the database hit happens at most once an hour.
-
-export const revalidate = 3600;
 
 const DAY_MS = 24 * 3600 * 1000;
 const WINDOW_DAYS = 30;
@@ -119,6 +119,9 @@ const PAGE_SIZE = 1000;
 const MAX_PAGES = 60; // 60 * 1000 = 60k rows, well above 30-day volume
 
 async function fetchTimeline(): Promise<DayBucket[]> {
+  "use cache";
+  cacheLife({ revalidate: 3600 });
+
   try {
     const supabase = createServerClient();
     const cutoffIso = new Date(Date.now() - WINDOW_DAYS * DAY_MS).toISOString();

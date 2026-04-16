@@ -18,10 +18,6 @@ import {
 import { getClusterDetail } from "@/lib/clusters/cluster-detail-query";
 import { formatTurkishTimeAgo } from "@/lib/time";
 
-// Detail page revalidates every 30s — matches the unstable_cache TTL in
-// `getClusterDetail`, so the SSR shell and the data fetch evict together.
-export const revalidate = 30;
-
 interface PageProps {
   // Next.js 16: dynamic-route `params` is a Promise and must be awaited.
   params: Promise<{ id: string }>;

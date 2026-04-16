@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:full": "node scripts/dev.mjs",
+    "start:full": "node scripts/dev.mjs --prod",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",

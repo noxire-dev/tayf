@@ -29,8 +29,6 @@ import {
 // cluster's `updated_at`. The data fetch itself is unchanged — the
 // politics-query helper caches its result for 30s, so re-filtering on
 // every request is essentially free.
-export const revalidate = 30;
-
 const PAGE_SIZE = 15;
 
 const DAY_MS = 24 * 60 * 60 * 1000;

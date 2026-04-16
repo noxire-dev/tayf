@@ -19,9 +19,6 @@ import { createServerClient } from "@/lib/supabase/server";
  *     melts down.
  */
 
-export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
-
 interface HealthStatus {
   status: "healthy" | "degraded" | "unhealthy";
   timestamp: string;

@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 
-export const dynamic = "force-dynamic";
-
 interface Metrics {
   timestamp: string;
   articles: {

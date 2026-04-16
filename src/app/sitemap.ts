@@ -1,3 +1,4 @@
+import { cacheLife } from "next/cache";
 import type { MetadataRoute } from "next";
 import { createServerClient } from "@/lib/supabase/server";
 
@@ -37,6 +38,9 @@ type SitemapClusterRow = {
 };
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
+  "use cache";
+  cacheLife({ revalidate: 3600 });
+
   const supabase = createServerClient();
   const baseUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
 
@@ -94,5 +98,3 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
 
   return [...staticRoutes, ...clusterRoutes];
 }
-
-export const revalidate = 3600; // 1 hour
