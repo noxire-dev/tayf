@@ -53,7 +53,15 @@ const DISPLAY_LIMIT = 30;
 // (~0–6) and combine into a single comparable score per cluster.
 const W_ARTICLE_COUNT = 1.0; // log2(article_count + 1)
 const W_ZONE_DIVERSITY = 0.5; // log2(distinct_zones + 1)
-const W_TIME_DECAY = 0.3; // per (hours/6) — 6h half-life
+// R6 decay bump: was 0.3. At 0.3 a 9h-old cluster only pays -0.45,
+// negligible vs. log2(count+1) which is 4+ for any cluster with 15
+// sources — so the home feed kept surfacing half-day-old stories. 0.5
+// roughly doubles the penalty at every age: 9h -> -0.75, 24h -> -2.0,
+// 48h -> -4.0. Combined with the R6 "Son Dakika" strip on page 1
+// (guarantees the freshest cluster slots regardless of score), the net
+// effect is that "Bugün" leans noticeably fresher while the Son Dakika
+// strip covers the last-2h breaking surface.
+const W_TIME_DECAY = 0.5; // per (hours/6) — 6h half-life
 const W_DOMINANCE_PENALTY = 0.2; // 1 if a single source > 60% of articles
 const DOMINANCE_THRESHOLD = 0.6;
 // R4 velocity bonus weight. Intentionally HIGH (matches a full extra
@@ -67,6 +75,21 @@ const DOMINANCE_THRESHOLD = 0.6;
 // the day still beats a 30-minute-old breaking story with 10 sources.
 // See team/logs/quality/07-coverage-breadth.md for the diagnostic.
 const W_VELOCITY = 1.0;
+
+// R6 "Son Dakika" surfacing: clusters whose `first_published` falls
+// within this window are pulled out of the ranked pool and rendered as
+// a dedicated strip at the top of page 1, sorted by recency (not
+// score). Turkish news consumption skews heavily toward breaking-news
+// surfacing — without this a 30-minute-old 3-source cluster loses the
+// score race to a 9h cluster with 15 sources, so fresh stories never
+// reach the fold. Drawn from the same 2+-source politics-majority
+// candidate pool as `ranked`, so the DB-level quality floor still
+// applies.
+//
+// Window: 2 hours. Cap: 6 slots so a major-event burst (e.g. earthquake
+// night, election night) doesn't drown out the rest of the feed.
+const BREAKING_WINDOW_MS = 2 * 60 * 60 * 1000;
+const BREAKING_LIMIT = 6;
 
 export interface ClusterBundle {
   cluster: ClusterCardCluster;
@@ -113,6 +136,19 @@ export interface ClusterBundle {
 
 export interface PoliticsClustersResult {
   bundles: ClusterBundle[];
+  /**
+   * R6 "Son Dakika" strip: clusters whose `first_published` is within
+   * the last BREAKING_WINDOW_MS (2h), sorted by recency DESC and capped
+   * at BREAKING_LIMIT (6). Drawn from the FULL politics-majority
+   * candidate pool — NOT from `bundles` — so a just-broken 2-source
+   * cluster is guaranteed to surface on page 1 even when its R1 score
+   * can't beat a 9h-old cluster with 15 sources.
+   *
+   * MAY overlap `bundles` by id: a fresh cluster that also scores in
+   * the top 30 appears in both. The page is expected to dedupe by
+   * `cluster.id` so it renders only once (in the Son Dakika strip).
+   */
+  breakingBundles: ClusterBundle[];
   /** Number of candidate clusters fetched before the politics filter. */
   prefilterCount: number;
 }
@@ -203,10 +239,11 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
 
     if (error) {
       console.warn("[clusters] embedded select error:", error.message);
-      return { bundles: [], prefilterCount: 0 };
+      return { bundles: [], breakingBundles: [], prefilterCount: 0 };
     }
     const clusterRows = data ?? [];
-    if (clusterRows.length === 0) return { bundles: [], prefilterCount: 0 };
+    if (clusterRows.length === 0)
+      return { bundles: [], breakingBundles: [], prefilterCount: 0 };
 
     const bundles: ClusterBundle[] = [];
     // Side-table: bundle → its post-dedupe member list. Used by
@@ -384,6 +421,28 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
       .slice(0, DISPLAY_LIMIT)
       .map((entry) => entry.bundle);
 
+    // R6 "Son Dakika": pull the freshest <2h clusters from the FULL
+    // candidate pool (not from `ranked`), so a just-broken 3-source
+    // story still surfaces on page 1 even when its R1 score can't beat
+    // a 9h-old 15-source cluster. Sorted by recency DESC (newest
+    // first) because score order defeats the purpose here — the strip
+    // is a recency guarantee, not a ranking. Capped at BREAKING_LIMIT
+    // so a major-event burst doesn't push every other section below
+    // the fold.
+    const breakingNowMs = Date.now();
+    const breakingBundles = bundles
+      .filter(
+        (b) =>
+          breakingNowMs - new Date(b.cluster.first_published).getTime() <
+          BREAKING_WINDOW_MS
+      )
+      .sort(
+        (a, b) =>
+          new Date(b.cluster.first_published).getTime() -
+          new Date(a.cluster.first_published).getTime()
+      )
+      .slice(0, BREAKING_LIMIT);
+
     // R3 source-fairness diagnostics. Count how many of the candidate
     // clusters had ANY source over the 10% cap, and how many of those
     // were dominated by haberler-com (the A8 finding to validate
@@ -414,10 +473,14 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
         `(haberler-com dominated ${haberlerDominatedCount} of them)`
     );
 
-    return { bundles: ranked, prefilterCount: clusterRows.length };
+    return {
+      bundles: ranked,
+      breakingBundles,
+      prefilterCount: clusterRows.length,
+    };
   } catch (err) {
     console.warn("[clusters] unexpected error:", err);
-    return { bundles: [], prefilterCount: 0 };
+    return { bundles: [], breakingBundles: [], prefilterCount: 0 };
   }
 }
 
@@ -599,12 +662,24 @@ function computeVelocity(members: Array<{ published_at: string }>): number {
 // step of log2(article_count + 1), so a 30-minute breaking story with
 // 10 sources outranks a 24-hour-old story with 15 sources spread
 // across the day.
+//
+// R5 stale-reactivation fix: decay anchors on `first_published`, not
+// `updated_at`. The clustering worker rewrites `updated_at` to the
+// latest member's `published_at` every time an article merges in — so
+// a week-old cluster that absorbed a single follow-up article today
+// previously paid zero decay penalty and ranked like breaking news.
+// Anchoring on `first_published` (the story's actual break time) makes
+// stale clusters decay off the homepage even when they pick up a
+// follow-up, while the VELOCITY term (unchanged, member-level) still
+// rewards clusters with a current burst of articles — so genuinely
+// active ongoing stories (İmamoğlu, trial coverage, etc.) continue to
+// rise via velocity + article_count rather than via stale updated_at.
 function scoreCluster(
   bundle: ClusterBundle,
   members: EmbeddedArticle[]
 ): number {
-  const updatedAt = new Date(bundle.cluster.updated_at).getTime();
-  const ageHours = (Date.now() - updatedAt) / 3_600_000;
+  const firstPublishedMs = new Date(bundle.cluster.first_published).getTime();
+  const ageHours = (Date.now() - firstPublishedMs) / 3_600_000;
   const decay = ageHours / 6;
   // R2 wire-collapse + R3 source-fairness cap: take the SMALLER of the
   // two corrections so the more aggressive normalisation wins without

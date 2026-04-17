@@ -76,14 +76,24 @@ export const POST = withApiErrors(async (request: Request) => {
 
     case "ingest": {
       const baseUrl = request.headers.get("origin") || "http://localhost:3000";
-      const res = await fetch(`${baseUrl}/api/cron/ingest`);
+      // Cron routes require Bearer CRON_SECRET in prod; forward it so the
+      // admin "Çek" button keeps working behind the same guard as Vercel Cron.
+      const headers: Record<string, string> = process.env.CRON_SECRET
+        ? { Authorization: `Bearer ${process.env.CRON_SECRET}` }
+        : {};
+      const res = await fetch(`${baseUrl}/api/cron/ingest`, { headers });
       const data = await res.json();
       return NextResponse.json(data);
     }
 
     case "backfill_images": {
       const baseUrl = request.headers.get("origin") || "http://localhost:3000";
-      const res = await fetch(`${baseUrl}/api/cron/backfill-images`);
+      const headers: Record<string, string> = process.env.CRON_SECRET
+        ? { Authorization: `Bearer ${process.env.CRON_SECRET}` }
+        : {};
+      const res = await fetch(`${baseUrl}/api/cron/backfill-images`, {
+        headers,
+      });
       const data = await res.json();
       return NextResponse.json(data);
     }

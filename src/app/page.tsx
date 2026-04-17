@@ -69,6 +69,37 @@ interface BucketWithClusters {
   clusters: ClusterBundle[];
 }
 
+// Shared card renderer used by both the "Son Dakika" strip and the
+// time-bucketed sections below it. Extracted because we now render the
+// same card JSX in two places. `idx` is passed in (not computed here)
+// so the caller can maintain a single cross-section counter for the
+// priority-image hint (first ~3 cards above the fold preload eagerly).
+// `nowMs` is passed in because Next.js 16's `react-hooks/purity` rule
+// forbids `Date.now()` in a Server Component render body — the page
+// captures it once per request.
+function renderClusterCard(
+  bundle: ClusterBundle,
+  idx: number,
+  nowMs: number
+) {
+  const hoursAgo =
+    (nowMs - new Date(bundle.cluster.updated_at).getTime()) / 3_600_000;
+  return (
+    <div
+      key={bundle.cluster.id}
+      className={`animate-fade-up stagger-${(idx % 8) + 1}`}
+    >
+      <ClusterCard
+        cluster={bundle.cluster}
+        articles={bundle.articles}
+        sources={bundle.sources}
+        index={idx}
+        isAging={hoursAgo > 48}
+      />
+    </div>
+  );
+}
+
 export default async function HomePage({
   searchParams,
 }: {
@@ -78,37 +109,59 @@ export default async function HomePage({
   const q = qRaw?.trim() || undefined;
   const page = Math.max(1, parseInt(pageRaw ?? "1", 10) || 1);
 
-  const { bundles } = await getPoliticsClusters();
+  const { bundles, breakingBundles } = await getPoliticsClusters();
 
   // Filter by Turkish-lowercased substring of the cluster title. We use
   // toLocaleLowerCase("tr") so dotted/dotless I are folded the way a
   // Turkish reader expects ("İstanbul" matches "istanbul").
   const needle = q?.toLocaleLowerCase("tr");
-  const filtered = needle
-    ? bundles.filter((b) =>
-        b.cluster.title_tr.toLocaleLowerCase("tr").includes(needle)
-      )
-    : bundles;
+  const matchesNeedle = (b: ClusterBundle) =>
+    !needle || b.cluster.title_tr.toLocaleLowerCase("tr").includes(needle);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const filteredBreaking = breakingBundles.filter(matchesNeedle);
+  const filtered = bundles.filter(matchesNeedle);
+
+  // Dedupe: a cluster that's both "breaking" (< 2h) AND in the top-30
+  // ranked set would otherwise render twice. The Son Dakika strip wins
+  // — we remove those ids from the main ranked list so each cluster
+  // appears in exactly one place on the page.
+  const breakingIds = new Set(filteredBreaking.map((b) => b.cluster.id));
+  const ranked = filtered.filter((b) => !breakingIds.has(b.cluster.id));
+
+  const totalPages = Math.max(1, Math.ceil(ranked.length / PAGE_SIZE));
   // Clamp the requested page so /?page=999 still renders the last page
   // instead of an empty list.
   const safePage = Math.min(page, totalPages);
-  const paged = filtered.slice(
+  const paged = ranked.slice(
     (safePage - 1) * PAGE_SIZE,
     safePage * PAGE_SIZE
   );
 
+  // Son Dakika is a page-1-only strip. On page 2+ the user is browsing
+  // deeper into the feed — re-showing the same breaking cards they
+  // already scanned at the top of page 1 would be noise. Search
+  // filtering still applies (via `filteredBreaking`), so a user
+  // searching for a specific story won't see an irrelevant strip.
+  const breaking = safePage === 1 ? filteredBreaking : [];
+
   // Time buckets are computed on the PAGED slice only — each page is
   // self-contained, so the bucket headings reflect what's actually on
   // screen rather than the full filtered set.
+  //
+  // R5 stale-reactivation fix: bucket on `first_published` (when the
+  // story broke) rather than `updated_at`. The clustering worker bumps
+  // `updated_at` to the latest member's `published_at` every time a
+  // follow-up article merges in, so a week-old cluster with one new
+  // article today used to show up under "Bugün" even though the news
+  // was stale. Bucketing on `first_published` makes the header labels
+  // reflect when the story actually broke.
   const nowMs = Date.now();
   const grouped = new Map<BucketKey, ClusterBundle[]>();
   for (const def of BUCKETS) grouped.set(def.key, []);
   for (const bundle of paged) {
-    const updatedAt = new Date(bundle.cluster.updated_at);
+    const firstPublished = new Date(bundle.cluster.first_published);
     for (const def of BUCKETS) {
-      if (def.matches(updatedAt, nowMs)) {
+      if (def.matches(firstPublished, nowMs)) {
         grouped.get(def.key)!.push(bundle);
         break;
       }
@@ -142,12 +195,35 @@ export default async function HomePage({
 
       <SearchBar />
 
-      {bundles.length === 0 ? (
+      {bundles.length === 0 && breakingBundles.length === 0 ? (
         <EmptyClusters />
-      ) : filtered.length === 0 ? (
+      ) : filtered.length === 0 && filteredBreaking.length === 0 ? (
         <EmptySearch query={q} />
       ) : (
         <>
+          {breaking.length > 0 && (
+            <section className="space-y-3">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="h-2 w-2 animate-pulse rounded-full bg-red-600 dark:bg-red-500"
+                    aria-hidden="true"
+                  />
+                  <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-red-600 dark:text-red-500">
+                    Son Dakika
+                  </h2>
+                </div>
+                <div className="h-px flex-1 bg-gradient-to-r from-red-500/40 to-transparent" />
+                <span className="text-[11px] text-muted-foreground">
+                  {breaking.length}
+                </span>
+              </div>
+              <div className="space-y-4">
+                {breaking.map((b) => renderClusterCard(b, renderIndex++, nowMs))}
+              </div>
+            </section>
+          )}
+
           {bucketsWithClusters.map((bucket) => (
             <section key={bucket.key} className="space-y-3">
               <div className="flex items-center gap-3">
@@ -160,30 +236,9 @@ export default async function HomePage({
                 </span>
               </div>
               <div className="space-y-4">
-                {bucket.clusters.map((b) => {
-                  const idx = renderIndex++;
-                  // Aging is computed here (parent) instead of inside
-                  // <ClusterCard> because Next.js 16's `react-hooks/purity`
-                  // rule forbids `Date.now()` in a Server Component render
-                  // body. `nowMs` is captured once per request above.
-                  const hoursAgo =
-                    (nowMs - new Date(b.cluster.updated_at).getTime()) /
-                    3_600_000;
-                  return (
-                    <div
-                      key={b.cluster.id}
-                      className={`animate-fade-up stagger-${(idx % 8) + 1}`}
-                    >
-                      <ClusterCard
-                        cluster={b.cluster}
-                        articles={b.articles}
-                        sources={b.sources}
-                        index={idx}
-                        isAging={hoursAgo > 48}
-                      />
-                    </div>
-                  );
-                })}
+                {bucket.clusters.map((b) =>
+                  renderClusterCard(b, renderIndex++, nowMs)
+                )}
               </div>
             </section>
           ))}
