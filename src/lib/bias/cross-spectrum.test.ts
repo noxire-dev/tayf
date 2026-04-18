@@ -45,11 +45,13 @@ describe("detectCrossSpectrum", () => {
   });
 
   it("flags iktidar outlet in muhalefet-dominant cluster", () => {
+    // A6 moved `nationalist` out of muhalefet (MHP is a Cumhur İttifakı ally),
+    // so this fixture uses four muhalefet-mapped outlets + one iktidar outlet.
     const sources = [
       mkSource("s1", "Sözcü", "opposition"),
       mkSource("s2", "Cumhuriyet", "opposition"),
       mkSource("s3", "Halk TV", "opposition_leaning"),
-      mkSource("s4", "Yeniçağ", "nationalist"),
+      mkSource("s4", "BirGün", "opposition"),
       mkSource("s5", "Sabah", "pro_government"),
     ];
     const result = detectCrossSpectrum(sources);
@@ -86,27 +88,28 @@ describe("detectCrossSpectrum", () => {
     expect(empty.surpriseOutlets).toHaveLength(0);
   });
 
-  it("uses the post-A6 0.45 threshold (no dominant below it)", () => {
-    // 4 zones split 1/1/2 → top is 50% which clears 0.45 → dominant set
-    const above = detectCrossSpectrum([
-      mkSource("s1", "A", "pro_government"),
-      mkSource("s2", "B", "pro_government"),
-      mkSource("s3", "C", "opposition"),
-      mkSource("s4", "D", "center"),
-    ]);
-    expect(above.dominantZone).toBe("iktidar");
-    expect(above.dominantPct).toBeCloseTo(0.5, 5);
-
-    // 5 sources split so no single zone clears 0.45 (max 2/5 = 40%)
+  it("uses the post-A6 0.65 threshold (no dominant below it)", () => {
+    // 5 sources at 60% iktidar → below 0.65 threshold → null
     const below = detectCrossSpectrum([
       mkSource("s1", "A", "pro_government"),
       mkSource("s2", "B", "pro_government"),
-      mkSource("s3", "C", "opposition"),
+      mkSource("s3", "C", "pro_government"),
       mkSource("s4", "D", "opposition"),
-      mkSource("s5", "E", "center"),
+      mkSource("s5", "E", "opposition"),
     ]);
     expect(below.dominantZone).toBeNull();
     expect(below.surpriseOutlets).toHaveLength(0);
+
+    // 5 sources at 80% iktidar → clears threshold, size floor, and margin
+    const above = detectCrossSpectrum([
+      mkSource("s1", "A", "pro_government"),
+      mkSource("s2", "B", "pro_government"),
+      mkSource("s3", "C", "pro_government"),
+      mkSource("s4", "D", "pro_government"),
+      mkSource("s5", "E", "opposition"),
+    ]);
+    expect(above.dominantZone).toBe("iktidar");
+    expect(above.dominantPct).toBeCloseTo(0.8, 5);
   });
 
   it("sets blindspotCandidate when dominantPct >= 0.85", () => {
@@ -131,11 +134,17 @@ describe("detectCrossSpectrum", () => {
   });
 
   it("does NOT set blindspotCandidate below 0.85", () => {
+    // 8 sources at 75% iktidar — clears the 0.65 threshold and the size +
+    // margin guards, but stays under the 0.85 blindspot line.
     const sources = [
       mkSource("s1", "Sabah", "pro_government"),
       mkSource("s2", "A Haber", "pro_government"),
       mkSource("s3", "TRT", "state_media"),
-      mkSource("s4", "Sözcü", "opposition"),
+      mkSource("s4", "Milliyet", "gov_leaning"),
+      mkSource("s5", "Yeni Şafak", "islamist_conservative"),
+      mkSource("s6", "Star", "pro_government"),
+      mkSource("s7", "Sözcü", "opposition"),
+      mkSource("s8", "Cumhuriyet", "opposition"),
     ];
     const result = detectCrossSpectrum(sources);
     expect(result.dominantZone).toBe("iktidar");
@@ -170,7 +179,8 @@ describe("summarizeSurprises", () => {
       mkSource("s1", "Sözcü", "opposition"),
       mkSource("s2", "Cumhuriyet", "opposition"),
       mkSource("s3", "Halk TV", "opposition_leaning"),
-      mkSource("s4", "Sabah", "pro_government"),
+      mkSource("s4", "BirGün", "opposition"),
+      mkSource("s5", "Sabah", "pro_government"),
     ];
     const result = detectCrossSpectrum(sources);
     const lines = summarizeSurprises(result, "Karşı manşet", 2);
@@ -191,14 +201,19 @@ describe("summarizeSurprises", () => {
   });
 
   it("respects the max cap on rendered lines", () => {
+    // 10 sources at 70% iktidar — clears the 0.65 threshold and the
+    // margin-of-3 guard, and leaves 3 muhalefet surprises to cap at 2.
     const sources = [
       mkSource("s1", "Sabah", "pro_government"),
       mkSource("s2", "A Haber", "pro_government"),
       mkSource("s3", "TRT", "state_media"),
       mkSource("s4", "Milliyet", "gov_leaning"),
-      mkSource("s5", "Sözcü", "opposition"),
-      mkSource("s6", "Cumhuriyet", "opposition"),
-      mkSource("s7", "Halk TV", "opposition_leaning"),
+      mkSource("s5", "Yeni Şafak", "islamist_conservative"),
+      mkSource("s6", "Star", "pro_government"),
+      mkSource("s7", "Akşam", "gov_leaning"),
+      mkSource("s8", "Sözcü", "opposition"),
+      mkSource("s9", "Cumhuriyet", "opposition"),
+      mkSource("s10", "Halk TV", "opposition_leaning"),
     ];
     const result = detectCrossSpectrum(sources);
     expect(result.surpriseOutlets.length).toBeGreaterThanOrEqual(3);
