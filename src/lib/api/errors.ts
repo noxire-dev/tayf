@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { unstable_rethrow } from "next/navigation";
 
 /**
  * Canonical error response shape for every JSON route under `src/app/api/`.
@@ -57,6 +58,14 @@ export const apiServerError = (err: unknown, code?: string) => {
  * so the generic is intentionally permissive. Any handler that returns a
  * `Promise<Response>` is accepted; thrown errors become a 500 via
  * `apiServerError` instead of Next's default HTML error page.
+ *
+ * `unstable_rethrow` is called before treating an error as a 500 because
+ * Next.js uses thrown errors as control-flow signals — `redirect()`,
+ * `notFound()`, `NEXT_PRERENDER_INTERRUPTED` (bail out of prerender when
+ * a route touches request.headers / cookies / dynamic APIs), etc. Those
+ * errors MUST propagate up to Next's internals or the framework gets
+ * confused and logs spurious 500s during build/prerender. Real errors
+ * fall through to `apiServerError`.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function withApiErrors<T extends (...args: any[]) => Promise<Response>>(
@@ -66,6 +75,7 @@ export function withApiErrors<T extends (...args: any[]) => Promise<Response>>(
     try {
       return await handler(...args);
     } catch (err) {
+      unstable_rethrow(err);
       return apiServerError(err);
     }
   }) as T;
