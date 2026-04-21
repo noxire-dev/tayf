@@ -40,7 +40,12 @@ export function WorkerStats() {
       }
     }
     fetchMetrics();
-    const interval = setInterval(fetchMetrics, 15000); // refresh every 15s
+    // Refresh every 60s. Each tick hits /api/metrics which runs ~10
+    // parallel count(*) queries against Supabase — at 15s that burned
+    // ~2.4k queries/hour while /admin sat open in a tab. 60s cuts it to
+    // 600/h without meaningfully degrading the admin feel (these are
+    // slow-moving totals, not live counters).
+    const interval = setInterval(fetchMetrics, 60000);
     return () => {
       cancelled = true;
       clearInterval(interval);

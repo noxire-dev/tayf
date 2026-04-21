@@ -1,9 +1,9 @@
 import { cacheLife } from "next/cache";
 
 import { PageHero } from "@/components/ui/page-hero";
-import { ZONE_META, zoneOf } from "@/lib/bias/config";
+import { ZONE_META } from "@/lib/bias/config";
 import { createServerClient } from "@/lib/supabase/server";
-import type { BiasCategory, MediaDnaZone } from "@/types";
+import type { MediaDnaZone } from "@/types";
 
 // /trends — 30-day historical Medya DNA mix.
 //
@@ -13,11 +13,13 @@ import type { BiasCategory, MediaDnaZone } from "@/types";
 // — no chart library, no client JS. Lets a reader scan a month at a glance
 // and spot days where one zone dominated the news.
 //
-// Data path: PostgREST cannot do `date_trunc + group by` directly, so we
-// pull only the (created_at, sources.bias) pair for the last 30 days and
-// fold the histogram in JS. Payload is small (~one row per article ≈ a few
-// thousand rows / month) and the whole page is wrapped in `revalidate=3600`
-// so the database hit happens at most once an hour.
+// Data path: server-side aggregation via the `trends_daily_bias_counts`
+// view (see supabase/migrations/023_trends_daily_histogram.sql). PostgREST
+// returns ≤ WINDOW_DAYS × 3 = 90 rows — one per (day, zone) — so egress is
+// bounded regardless of how many articles the window contains. The old
+// approach paged through raw articles (15-25k rows) just to fold the same
+// histogram in JS. The page is still wrapped in `revalidate=3600` so the
+// DB is hit at most once an hour per region.
 
 const DAY_MS = 24 * 3600 * 1000;
 const WINDOW_DAYS = 30;
@@ -55,18 +57,20 @@ type DayBucket = {
   total: number;
 };
 
-type ArticleRow = {
-  created_at: string;
-  sources: { bias: BiasCategory } | null;
+/** One row per (day, zone) from the `trends_daily_bias_counts` view. */
+type AggregateRow = {
+  day: string; // "YYYY-MM-DD" (date → ISO string via PostgREST)
+  zone: MediaDnaZone;
+  count: number;
 };
 
 /**
- * Fold raw rows into a contiguous 30-day timeline. Days with zero
- * articles are still emitted (with all-zero counts) so the chart x-axis
- * is gap-free and a quiet day reads as a blank column rather than a
- * missing one.
+ * Build a contiguous 30-day timeline and merge in the pre-aggregated view
+ * rows. Days with zero articles are still emitted (with all-zero counts)
+ * so the chart x-axis is gap-free and a quiet day reads as a blank column
+ * rather than a missing one.
  */
-function bucketByDay(rows: ArticleRow[]): DayBucket[] {
+function bucketFromAggregates(rows: AggregateRow[]): DayBucket[] {
   // Compute the inclusive [start, end] window in UTC. We anchor `end` to
   // the start of *today* UTC so the rightmost bar is always "today" and
   // the leftmost is "29 days ago".
@@ -89,34 +93,14 @@ function bucketByDay(rows: ArticleRow[]): DayBucket[] {
   }
 
   for (const row of rows) {
-    const bias = row.sources?.bias;
-    if (!bias) continue;
-    const key = row.created_at.slice(0, 10);
-    const bucket = buckets.get(key);
+    const bucket = buckets.get(row.day);
     if (!bucket) continue; // outside window — defensive against clock skew
-    const zone = zoneOf(bias);
-    bucket.counts[zone]++;
-    bucket.total++;
+    bucket.counts[row.zone] += row.count;
+    bucket.total += row.count;
   }
 
   return Array.from(buckets.values());
 }
-
-// Supabase / PostgREST enforces a server-side `max-rows` cap (1000 by
-// default on hosted Supabase). A bare `.select(...)` against `articles`
-// for a 30-day window silently returns only the first 1000 rows, so the
-// trends chart was showing ~5% of Tayf's ~22k articles. `.range()` lifts
-// the cap up to `max-rows` but cannot exceed it, which means the only
-// reliable way to fetch the whole window is to page through it.
-//
-// We fetch in fixed-size chunks using `.range(from, from + PAGE - 1)`,
-// stopping as soon as a short page comes back (fewer than PAGE rows =
-// end of data). PAGE is kept at the default cap so every request is
-// guaranteed to be honoured by PostgREST, and MAX_PAGES is a sanity
-// ceiling that protects us from runaway loops if something upstream
-// starts returning bad counts.
-const PAGE_SIZE = 1000;
-const MAX_PAGES = 60; // 60 * 1000 = 60k rows, well above 30-day volume
 
 async function fetchTimeline(): Promise<DayBucket[]> {
   "use cache";
@@ -124,47 +108,29 @@ async function fetchTimeline(): Promise<DayBucket[]> {
 
   try {
     const supabase = createServerClient();
-    const cutoffIso = new Date(Date.now() - WINDOW_DAYS * DAY_MS).toISOString();
 
-    // Tight projection: only the two columns we need to bucket. The
-    // embedded select gives us each article's source bias in one round
-    // trip without a manual id join.
-    const rows: ArticleRow[] = [];
-    for (let page = 0; page < MAX_PAGES; page++) {
-      const from = page * PAGE_SIZE;
-      const to = from + PAGE_SIZE - 1;
+    // `day` in the view is a DATE, so we filter on a bare `YYYY-MM-DD`
+    // cutoff rather than a full timestamp. This bounds the payload at
+    // `WINDOW_DAYS * (# zones)` rows regardless of article volume.
+    const cutoffDay = new Date(Date.now() - WINDOW_DAYS * DAY_MS)
+      .toISOString()
+      .slice(0, 10);
 
-      const { data, error } = await supabase
-        .from("articles")
-        .select("created_at, sources ( bias )")
-        .gt("created_at", cutoffIso)
-        .order("created_at", { ascending: true })
-        .range(from, to)
-        .returns<ArticleRow[]>();
+    const { data, error } = await supabase
+      .from("trends_daily_bias_counts")
+      .select("day, zone, count")
+      .gte("day", cutoffDay)
+      .returns<AggregateRow[]>();
 
-      if (error) {
-        console.error("[trends] fetchTimeline error", error.message);
-        return bucketByDay(rows);
-      }
-
-      const chunk = data ?? [];
-      rows.push(...chunk);
-
-      // A short page means we've reached the end of the dataset and
-      // the next `.range()` call would just return []. Bail early.
-      if (chunk.length < PAGE_SIZE) break;
-
-      if (page === MAX_PAGES - 1) {
-        console.warn(
-          `[trends] fetchTimeline hit MAX_PAGES (${MAX_PAGES}); data may be truncated`
-        );
-      }
+    if (error) {
+      console.error("[trends] fetchTimeline error", error.message);
+      return bucketFromAggregates([]);
     }
 
-    return bucketByDay(rows);
+    return bucketFromAggregates(data ?? []);
   } catch (err) {
     console.error("[trends] unexpected error", err);
-    return bucketByDay([]);
+    return bucketFromAggregates([]);
   }
 }
 
