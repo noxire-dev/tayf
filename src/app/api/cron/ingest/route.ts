@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { fetchAllFeeds } from "@/lib/rss/fetcher";
 import { normalizeArticles } from "@/lib/rss/normalize";
@@ -47,6 +47,11 @@ const ingestLimit = createRateLimiter("cron-ingest", {
  * instead of re-ingesting.
  */
 export const GET = withApiErrors(async (request: Request) => {
+  // Next.js 16 with cacheComponents prerenders GET handlers at build time.
+  // `await connection()` returns a hanging promise during prerender so
+  // `request.headers` below is never touched until an actual request hits.
+  // See https://nextjs.org/docs/messages/next-prerender-sync-request.
+  await connection();
   // Verify cron secret in production
   const authHeader = request.headers.get("authorization");
   if (

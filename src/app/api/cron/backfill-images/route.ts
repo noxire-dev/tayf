@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { fetchOgImage } from "@/lib/rss/og-image";
 import {
@@ -38,6 +38,11 @@ const backfillLimit = createRateLimiter("cron-backfill-images", {
  * the `remaining` field says "all done".
  */
 export const GET = withApiErrors(async (request: Request) => {
+  // Next.js 16 with cacheComponents prerenders GET handlers at build time.
+  // `await connection()` returns a hanging promise during prerender so
+  // `request.headers` below is never touched until an actual request hits.
+  // See https://nextjs.org/docs/messages/next-prerender-sync-request.
+  await connection();
   const authHeader = request.headers.get("authorization");
   if (
     process.env.CRON_SECRET &&
