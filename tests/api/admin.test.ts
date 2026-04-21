@@ -71,6 +71,20 @@ vi.mock("@/lib/rss/og-image", () => ({
   fetchOgImage: async () => null,
 }));
 
+// The cron routes call `await connection()` at the top so Next.js 16's
+// cache-components prerender doesn't choke on `request.headers`. Outside a
+// Next.js request scope (i.e. here in vitest) the real `connection()` throws
+// "called outside a request scope" — resolve it to a no-op so the handlers
+// can run. Everything else from `next/server` (NextResponse, etc.) passes
+// through untouched via `importOriginal`.
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return {
+    ...actual,
+    connection: async () => {},
+  };
+});
+
 // Admin session mock. Default is "authenticated" so the existing happy-path
 // tests keep exercising the stat-shape and validation branches inside the
 // route. The "unauthenticated" describe block flips this to false before
