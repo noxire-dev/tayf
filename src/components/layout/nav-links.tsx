@@ -11,7 +11,18 @@ const inactive =
   "text-foreground/80 hover:text-foreground hover:bg-muted/50";
 const active = "bg-foreground/10 text-foreground font-medium";
 
-export function NavLinks() {
+interface NavLinksProps {
+  /**
+   * Whether the current viewer has a valid admin session cookie. When
+   * false we hide the /admin link entirely so the gear icon isn't sitting
+   * in every visitor's header as a "click me" target. The admin route
+   * itself is still protected server-side (see lib/admin/session) —
+   * this is just UX cleanup.
+   */
+  showAdmin?: boolean;
+}
+
+export function NavLinks({ showAdmin = false }: NavLinksProps) {
   const pathname = usePathname();
 
   const isHome = pathname === "/";
@@ -37,19 +48,23 @@ export function NavLinks() {
         <Eye className="h-3.5 w-3.5" />
         <span className="hidden sm:inline">Kör Noktalar</span>
       </Link>
-      <Separator orientation="vertical" className="h-3 mx-0.5" />
-      <Link
-        href="/admin"
-        aria-current={isAdmin ? "page" : undefined}
-        className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors ${
-          isAdmin
-            ? active
-            : "text-muted-foreground/60 hover:text-foreground hover:bg-muted/50"
-        }`}
-      >
-        <Settings className="h-3.5 w-3.5" />
-        <span className="sr-only">Admin</span>
-      </Link>
+      {showAdmin && (
+        <>
+          <Separator orientation="vertical" className="h-3 mx-0.5" />
+          <Link
+            href="/admin"
+            aria-current={isAdmin ? "page" : undefined}
+            className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors ${
+              isAdmin
+                ? active
+                : "text-muted-foreground/60 hover:text-foreground hover:bg-muted/50"
+            }`}
+          >
+            <Settings className="h-3.5 w-3.5" />
+            <span className="sr-only">Admin</span>
+          </Link>
+        </>
+      )}
     </nav>
   );
 }

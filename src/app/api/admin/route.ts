@@ -3,9 +3,11 @@ import { createServerClient } from "@/lib/supabase/server";
 import {
   apiBadRequest,
   apiError,
+  apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+import { hasAdminSession } from "@/lib/admin/session";
 
 // Mutating admin actions: 20-token bucket, refilling at 0.2 tokens/sec
 // (1 token every 5s). Bursts of ~20 are fine, sustained spam gets 429'd.
@@ -17,6 +19,13 @@ const adminPostLimit = createRateLimiter("admin-post", {
 });
 
 export const GET = withApiErrors(async () => {
+  // Real auth boundary for admin data. The /admin page also calls
+  // requireAdminSession(), but this route is the one a malicious client
+  // could hit directly — so don't rely on the page gate.
+  if (!(await hasAdminSession())) {
+    return apiUnauthorized();
+  }
+
   const supabase = createServerClient();
 
   const [
@@ -49,6 +58,10 @@ export const GET = withApiErrors(async () => {
 });
 
 export const POST = withApiErrors(async (request: Request) => {
+  if (!(await hasAdminSession())) {
+    return apiUnauthorized();
+  }
+
   const rl = adminPostLimit(clientKey(request));
   if (!rl.allowed) {
     return apiError(429, "Too many requests", {

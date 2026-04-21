@@ -71,6 +71,24 @@ vi.mock("@/lib/rss/og-image", () => ({
   fetchOgImage: async () => null,
 }));
 
+// Admin session mock. Default is "authenticated" so the existing happy-path
+// tests keep exercising the stat-shape and validation branches inside the
+// route. The "unauthenticated" describe block flips this to false before
+// each of its tests to exercise the 401 gate that sits at the top of GET
+// and POST (see src/app/api/admin/route.ts).
+let __adminAuthed = true;
+vi.mock("@/lib/admin/session", () => ({
+  hasAdminSession: async () => __adminAuthed,
+  // Not used by the route, but export the full surface so other callers
+  // that might be transitively pulled in don't explode if they land here.
+  requireAdminSession: async () => {
+    if (!__adminAuthed) throw new Error("unauthenticated");
+  },
+  checkAdminPassword: () => false,
+  createAdminSession: async () => {},
+  deleteAdminSession: async () => {},
+}));
+
 const ORIGINAL_ENV = { ...process.env };
 
 beforeEach(() => {
@@ -78,6 +96,7 @@ beforeEach(() => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   delete process.env.CRON_SECRET;
   resetTableResponses();
+  __adminAuthed = true;
 });
 
 afterEach(() => {
@@ -151,6 +170,34 @@ describe("POST /api/admin", () => {
     });
     const res = await mod.POST(req);
     expect(res.status).toBe(400);
+  });
+});
+
+// Auth gate — the admin session check runs before any rate limiting or
+// business logic, so every admin call without a session must 401.
+describe("/api/admin (unauthenticated)", () => {
+  beforeEach(() => {
+    __adminAuthed = false;
+  });
+
+  it("GET returns 401 without a session", async () => {
+    const mod = await import("@/app/api/admin/route");
+    const res = await mod.GET(new Request("http://example.com/api/admin"));
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body?.error).toBeTruthy();
+  });
+
+  it("POST returns 401 without a session (ahead of the 400 action check)", async () => {
+    const mod = await import("@/app/api/admin/route");
+    const req = new Request("http://example.com/api/admin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // Even an obviously-bad action shouldn't leak a 400 — auth first.
+      body: JSON.stringify({ action: "definitely_not_a_real_action" }),
+    });
+    const res = await mod.POST(req);
+    expect(res.status).toBe(401);
   });
 });
 

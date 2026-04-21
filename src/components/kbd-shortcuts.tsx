@@ -3,11 +3,14 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 
+// The admin panel intentionally isn't listed here — it's behind a login
+// and shouldn't advertise itself to normal visitors via the ? help popup.
+// Admins can still type /admin directly; if session is missing they get
+// redirected to /admin/login.
 const SHORTCUTS = [
   { keys: ["g", "h"], label: "Ana sayfa", href: "/" },
   { keys: ["g", "b"], label: "Kör noktalar", href: "/blindspots" },
   { keys: ["g", "s"], label: "Kaynaklar", href: "/sources" },
-  { keys: ["g", "a"], label: "Admin", href: "/admin" },
 ];
 
 export function KbdShortcuts() {

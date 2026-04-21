@@ -1,8 +1,14 @@
 import Link from "next/link";
 import { Separator } from "@/components/ui/separator";
 import { NavLinks } from "@/components/layout/nav-links";
+import { hasAdminSession } from "@/lib/admin/session";
 
-export function Header() {
+export async function Header() {
+  // Server-side session check so the admin link is invisible to anyone
+  // without a valid cookie. Runs per-request; negligible cost (HMAC verify
+  // of a short string) and keeps /admin out of the HTML entirely.
+  const showAdmin = await hasAdminSession();
+
   return (
     <header className="sticky top-0 z-50 border-b border-border/40 bg-background/90 backdrop-blur-xl">
       {/* Thin brand accent line at the very top */}
@@ -30,7 +36,7 @@ export function Header() {
           </div>
         </Link>
 
-        <NavLinks />
+        <NavLinks showAdmin={showAdmin} />
       </div>
     </header>
   );
