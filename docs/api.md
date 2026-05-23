@@ -143,7 +143,7 @@ Cached entry point for the home feed. Returns ranked `ClusterBundle[]` with:
 - Source fairness cap (each source ≤10% of cluster article count)
 - Importance ranking (article count, zone diversity, time decay, dominance penalty, velocity)
 
-Cache: `cluster-feed` profile (30s), tag `clusters-politics`.
+Cache: `cluster-feed` profile (5 min revalidate), tag `clusters-politics`.
 
 ---
 

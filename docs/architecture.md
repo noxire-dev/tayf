@@ -145,7 +145,7 @@ Tayf uses Next.js 16 Cache Components (`"use cache"` directive) with named cache
 
 | Profile | stale | revalidate | expire | Used by |
 |---|---|---|---|---|
-| `cluster-feed` | 30s | 30s | 300s | Home feed, cluster detail, timeline, blindspots |
+| `cluster-feed` | 60s | 300s | 3600s | Home feed, cluster detail, timeline, blindspots |
 | `source-directory` | 60s | 300s | 3600s | Sources page, source profiles |
 
 Cache tags (`cacheTag`) enable targeted invalidation: `clusters`, `clusters-politics`, `cluster-detail:{id}`, `sources`, `articles`.

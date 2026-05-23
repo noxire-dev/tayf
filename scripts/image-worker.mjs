@@ -84,10 +84,11 @@ loadDotEnvLocal();
 
 const DRY_RUN = process.env.DRY_RUN === "1" || process.env.DRY_RUN === "true";
 
-// Adaptive sleep: 30s after a productive cycle, 120s when there was nothing
-// to do. We're not latency-sensitive — og:image backfill is a catch-up job.
-const CYCLE_SLEEP_WORK_MS = 30_000;
-const CYCLE_SLEEP_IDLE_MS = 120_000;
+// Adaptive sleep: og:image backfill is a catch-up job, not latency-sensitive.
+// Bumped from 30s/120s to cut Supabase egress — per-cycle does ~100 individual
+// row updates, so slower cycles directly translate to fewer writes.
+const CYCLE_SLEEP_WORK_MS = 60_000;
+const CYCLE_SLEEP_IDLE_MS = 300_000;
 
 // Bumped 50 → 100 in I4-WORKER backlog-drain tuning. Q10's politics filter
 // kept each cycle cheap enough that 50 was the right ceiling; now that we

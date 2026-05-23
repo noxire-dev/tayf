@@ -46,9 +46,12 @@ import { pathToFileURL } from "node:url";
 // Module-level constants (pure, no side effects)
 // ---------------------------------------------------------------------------
 
-const CYCLE_INTERVAL_IDLE_MS = 60_000;     // sleep 60s if nothing processed
-const CYCLE_INTERVAL_NORMAL_MS = 30_000;   // sleep 30s on typical (1..10) batches
-const CYCLE_INTERVAL_BUSY_MS = 15_000;     // sleep 15s if batch was > 10
+// Cadences were 15/30/60s. Bumped to cut Supabase egress while the
+// per-cycle full-table scan on cluster_articles (line ~797) remains —
+// most cycles fetch nothing useful, so sleeping longer is free.
+const CYCLE_INTERVAL_IDLE_MS = 300_000;    // sleep 5m if nothing processed
+const CYCLE_INTERVAL_NORMAL_MS = 60_000;   // sleep 60s on typical (1..10) batches
+const CYCLE_INTERVAL_BUSY_MS = 30_000;     // sleep 30s if batch was > 10
 const BATCH_SIZE = 500;
 const ENRICH_UPSERT_CHUNK = 50;            // fallback chunk size if bulk upsert fails
 const CLUSTER_CONTEXT_TTL_MS = 60_000;     // cache rolling cluster context for 60s

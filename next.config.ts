@@ -51,11 +51,13 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   cacheComponents: true,
   cacheLife: {
-    // Cluster data refreshes every 30s (matches cluster-worker cycle).
+    // Cluster-worker cycles every 15-60s (adaptive), so a 5-min revalidate
+    // window keeps the homepage at most ~5 min stale while cutting Supabase
+    // egress on this path ~10x vs the previous 30s window.
     'cluster-feed': {
-      stale: 30,
-      revalidate: 30,
-      expire: 300,
+      stale: 60,
+      revalidate: 300,
+      expire: 3600,
     },
     // Source directory shifts weekly; 5-minute cache is plenty fresh.
     'source-directory': {
