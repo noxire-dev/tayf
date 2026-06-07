@@ -111,16 +111,25 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 const ORIGINAL_ENV = { ...process.env };
+const TEST_CRON_SECRET = "test-cron-secret-for-metrics-route";
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  // The metrics route fail-closes on a missing CRON_SECRET (503) and
+  // 401s any caller without a matching Bearer header. Tests default to
+  // a bearer-authed Request so they exercise the count-aggregation path.
+  process.env.CRON_SECRET = TEST_CRON_SECRET;
   currentCounts = [...DEFAULT_COUNTS];
   callIndex = 0;
 });
 
 afterEach(() => {
-  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
+  for (const k of [
+    "NEXT_PUBLIC_SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "CRON_SECRET",
+  ]) {
     if (k in ORIGINAL_ENV) {
       process.env[k] = ORIGINAL_ENV[k] as string;
     } else {
@@ -130,9 +139,14 @@ afterEach(() => {
   vi.resetModules();
 });
 
-async function callGet() {
+async function callGet(request?: Request) {
   const mod = await import("@/app/api/metrics/route");
-  const res = await mod.GET();
+  const authedRequest =
+    request ??
+    new Request("http://localhost/api/metrics", {
+      headers: { Authorization: `Bearer ${TEST_CRON_SECRET}` },
+    });
+  const res = await mod.GET(authedRequest);
   const body = await res.json();
   return { res, status: res.status, body };
 }
@@ -166,9 +180,12 @@ describe("GET /api/metrics", () => {
     });
   });
 
-  it("sets a 60-second public cache header", async () => {
+  it("returns the no-store cache header so auth-gated data is not CDN-cached", async () => {
     const { res } = await callGet();
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=60");
+    // The metrics route used to emit `public, max-age=60` but the
+    // worker-stream refactor moved the route behind a bearer gate; we no
+    // longer want any cache layer between Vercel and the dashboard.
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
   it("treats null count values as 0", async () => {

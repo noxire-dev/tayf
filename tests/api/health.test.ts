@@ -133,6 +133,10 @@ const ORIGINAL_ENV = { ...process.env };
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  // Bearer-gated detailed envelope: every test that asserts on body.checks
+  // needs the route to consider it authenticated. The default callGet
+  // builds a Bearer header with this same secret.
+  process.env.CRON_SECRET = TEST_CRON_SECRET;
   // Reset responders to "healthy" defaults.
   responders.sourcesSelect = async () => ({
     data: [{ id: "s1" }],
@@ -166,7 +170,11 @@ beforeEach(() => {
 afterEach(() => {
   // Restore env keys we touched to their original values (or delete if they
   // weren't there before).
-  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
+  for (const k of [
+    "NEXT_PUBLIC_SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "CRON_SECRET",
+  ]) {
     if (k in ORIGINAL_ENV) {
       process.env[k] = ORIGINAL_ENV[k] as string;
     } else {
@@ -176,9 +184,22 @@ afterEach(() => {
   vi.resetModules();
 });
 
+const TEST_CRON_SECRET = "test-cron-secret-for-health-route";
+
 async function callGet(request?: Request) {
   const mod = await import("@/app/api/health/route");
-  const res = await mod.GET(request);
+  // The route gates the detailed `body.checks.*` envelope behind a
+  // constant-time bearer check against CRON_SECRET. Tests default to
+  // sending the bearer so they exercise the detailed branch every assertion
+  // here depends on. Tests that explicitly want to verify anonymous-rate-
+  // limit / `{status, timestamp}` behaviour can pass their own bare
+  // `new Request(...)` without an Authorization header.
+  const authedRequest =
+    request ??
+    new Request("http://localhost/api/health", {
+      headers: { Authorization: `Bearer ${TEST_CRON_SECRET}` },
+    });
+  const res = await mod.GET(authedRequest);
   const body = await res.json();
   return { status: res.status, body };
 }

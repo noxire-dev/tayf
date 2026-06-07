@@ -113,10 +113,16 @@ describe("migration 025_worker_triggers.sql (static)", () => {
     // Round-4 fix: the SECURITY DEFINER trigger functions invoke pgmq.send
     // under the function-owner identity; without this grant the trigger
     // fails with "permission denied for function pgmq.send" on any
-    // non-service_role owner. Tripwire: removing this block silently
-    // regresses Round-3 P1 (SECURITY DEFINER grant propagation risk).
-    expect(sql).toMatch(/grant\s+execute\s+on\s+function[\s\S]+pgmq[\s\S]+postgres/i);
-    expect(sql).toMatch(/supabase_admin/);
+    // non-service_role owner. The migration implements the grant via a
+    // defensive `do $$ ... execute format('grant execute on function %s
+    // to %I', ...) $$;` block so it survives function-overload set drift
+    // AND missing-role scenarios (vanilla Postgres without the Supabase
+    // role bundle). Tripwire: removing any of the four invariants below
+    // silently regresses Round-3 P1 (SECURITY DEFINER grant propagation).
+    expect(sql).toMatch(/grant\s+execute\s+on\s+function/i);
+    expect(sql).toMatch(/n\.nspname\s*=\s*'pgmq'/i);
+    expect(sql).toMatch(/'postgres'\s*,\s*'supabase_admin'/);
+    expect(sql).toMatch(/pg_roles\s+where\s+rolname\s*=\s*target_role/i);
   });
 });
 
