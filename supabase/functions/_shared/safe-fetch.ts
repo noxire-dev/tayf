@@ -202,9 +202,15 @@ function matchIPv6Block(parsed: { high: bigint; low: bigint }, block: IPv6Block)
 
 /**
  * Test whether a literal IP address (v4 or v6) falls in any blocked range.
- * Returns the offending block label on match, null otherwise. Unknown input
- * is treated as "blocked" — better to refuse a request we don't understand
- * than to forward it.
+ * Returns the offending block label on match, null otherwise.
+ *
+ * Non-literal input (e.g. a hostname like "example.com") also returns null —
+ * meaning "this is not a literal IP I can classify". Callers MUST treat the
+ * null return as "fall through to hostname normalisation + DNS resolution",
+ * NOT as "address is safe". The previous contract that returned a truthy
+ * string for unparseable input was a footgun: assertHostnameIsPublic would
+ * mis-classify every hostname as a "literal IP in blocked range" and refuse
+ * every outbound request.
  */
 export function isPrivateAddress(ip: string): string | null {
   const v4 = parseIPv4(ip);
@@ -221,7 +227,7 @@ export function isPrivateAddress(ip: string): string | null {
     }
     return null;
   }
-  return "unparseable address";
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -238,12 +244,18 @@ export function isPrivateAddress(ip: string): string | null {
  * should be blocked.
  */
 export async function assertHostnameIsPublic(hostname: string): Promise<string | null> {
-  // Literal IP fast path — skip DNS, just validate the literal.
-  const literal = isPrivateAddress(hostname);
-  if (literal !== null) {
-    return `literal IP in blocked range (${literal})`;
-  }
-  if (parseIPv4(hostname) !== null || parseIPv6(hostname.replace(/^\[|\]$/g, "")) !== null) {
+  // Literal IP fast path — skip DNS, just validate the literal. Only treat
+  // the hostname as a literal IP if it actually parses as one; otherwise
+  // isPrivateAddress's null return means "not an IP I can classify" and we
+  // must fall through to hostname normalisation + DNS resolution below.
+  const bareHost = hostname.replace(/^\[|\]$/g, "");
+  const isLiteralIp =
+    parseIPv4(bareHost) !== null || parseIPv6(bareHost) !== null;
+  if (isLiteralIp) {
+    const literal = isPrivateAddress(bareHost);
+    if (literal !== null) {
+      return `literal IP in blocked range (${literal})`;
+    }
     // Literal IP that wasn't in a blocked range: safe.
     return null;
   }
