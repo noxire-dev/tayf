@@ -20,10 +20,10 @@ import { clientKey, createRateLimiter } from "@/lib/rate-limit";
  * Walks the partial index `idx_clusters_needs_rewrite`
  * (`title_neutral_at IS NULL AND article_count >= 3`) in a small batch,
  * fetches the member article titles for each candidate cluster, asks the
- * Anthropic API (`claude-haiku-4-5`) for a neutral Turkish summary headline,
- * then writes the result into `clusters.title_tr_neutral` and stamps
- * `title_neutral_at = now()`. Per A3 the LLM cost stays under $1/month at
- * the default cadence — keep the batch small.
+ * configured LLM API for a neutral Turkish summary headline, then writes the
+ * result into `clusters.title_tr_neutral` and stamps
+ * `title_neutral_at = now()`. The LLM cost stays under $1/month at the
+ * default cadence — keep the batch small.
  *
  * AUTH
  * ----
@@ -35,14 +35,14 @@ import { clientKey, createRateLimiter } from "@/lib/rate-limit";
  * any external caller must supply the same header.
  */
 
-// Node runtime — the LLM call uses `fetch` against api.anthropic.com plus
-// the Supabase JS client, which is happiest on Node 24.x rather than Edge.
+// Node runtime — the LLM call uses `fetch` plus the Supabase JS client,
+// which is happiest on Node 24.x rather than Edge.
 export const runtime = "nodejs";
 
 // Vercel Pro Hobby/Pro tier ceiling for cron routes. Per-cycle work is
 // LLM-bound (one network round-trip per cluster, sequential) so 60s leaves
-// headroom even on slow Anthropic responses while still keeping the cron
-// quick enough to overlap cleanly with the */5 schedule.
+// headroom even on slow LLM responses while still keeping the cron quick
+// enough to overlap cleanly with the */5 schedule.
 export const maxDuration = 60;
 
 // Token-bucket guard — the cron itself ticks every 5 minutes (well under
@@ -54,8 +54,8 @@ const headlineLimit = createRateLimiter("cron-headline", {
 });
 
 // LLM batch size. Matches `scripts/headline-worker.mjs` — small on purpose
-// so a transient Anthropic 5xx doesn't blow the whole cycle and so monthly
-// spend stays bounded.
+// so a transient 5xx doesn't blow the whole cycle and so monthly spend
+// stays bounded.
 const LLM_BATCH = 5;
 
 // Same `MEMBER_TITLES_CAP` as the tmux worker. The rewriter slices to 8
@@ -65,8 +65,8 @@ const MEMBER_TITLES_CAP = 16;
 
 const MIN_ARTICLE_COUNT = 3;
 
-const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
+const LLM_API_URL = "https://api.anthropic.com/v1/messages";
+const LLM_MODEL = "claude-haiku-4-5-20251001";
 
 /**
  * Constant-time bearer-token check.
@@ -102,16 +102,17 @@ interface ClusterArticleRow {
 }
 
 /**
- * Ask Claude Haiku for a neutral, factual aggregator headline for a cluster.
- * Ports the prompt + parsing logic from `scripts/lib/shared/llm-headlines.mjs`
- * so the tmux worker and this cron emit identical output for the same input.
+ * Ask the configured LLM for a neutral, factual aggregator headline for a
+ * cluster. Ports the prompt + parsing logic from
+ * `scripts/lib/shared/llm-headlines.mjs` so the tmux worker and this cron
+ * emit identical output for the same input.
  */
 async function rewriteClusterHeadline(input: {
   member_titles: string[];
 }): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    throw new Error("ANTHROPIC_API_KEY not set");
+    throw new Error("LLM API key not set");
   }
 
   const memberTitles = input.member_titles
@@ -135,7 +136,7 @@ ${memberTitles}
 
 TARAFSIZ TOPLU BAŞLIK:`;
 
-  const res = await fetch(ANTHROPIC_API_URL, {
+  const res = await fetch(LLM_API_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -143,7 +144,7 @@ TARAFSIZ TOPLU BAŞLIK:`;
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: ANTHROPIC_MODEL,
+      model: LLM_MODEL,
       max_tokens: 100,
       messages: [{ role: "user", content: prompt }],
     }),
@@ -151,7 +152,7 @@ TARAFSIZ TOPLU BAŞLIK:`;
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Anthropic API ${res.status}: ${text}`);
+    throw new Error(`LLM API ${res.status}: ${text}`);
   }
 
   const data = (await res.json()) as {
@@ -159,7 +160,7 @@ TARAFSIZ TOPLU BAŞLIK:`;
   };
   const text = data.content?.[0]?.text?.trim();
   if (!text) {
-    throw new Error("Empty response from Anthropic");
+    throw new Error("Empty response from LLM");
   }
 
   // Strip stray wrapping quotes (curly + straight) the model sometimes adds.
@@ -194,13 +195,13 @@ export const GET = withApiErrors(async (request: Request) => {
     });
   }
 
-  // No ANTHROPIC_API_KEY → soft no-op. The cron will keep firing every 5
-  // minutes, so an operator that drops a key into Vercel env vars and
-  // redeploys gets healing on the very next tick — no manual kick needed.
+  // No API key → soft no-op. The cron will keep firing every 5 minutes,
+  // so an operator that drops a key into Vercel env vars and redeploys
+  // gets healing on the very next tick — no manual kick needed.
   if (!process.env.ANTHROPIC_API_KEY) {
     return NextResponse.json({
       skipped: true,
-      reason: "ANTHROPIC_API_KEY not set",
+      reason: "LLM API key not set",
       timestamp: new Date().toISOString(),
     });
   }
@@ -242,9 +243,9 @@ export const GET = withApiErrors(async (request: Request) => {
   let errored = 0;
   const perCluster: Record<string, { status: string; error?: string }> = {};
 
-  // Sequential. The Anthropic API is fine with bursts but cost-conscious
-  // mode wants serialised retries; one bad cluster shouldn't blow the
-  // whole batch and we want predictable wall time inside the 60s ceiling.
+  // Sequential. The LLM API is fine with bursts but cost-conscious mode
+  // wants serialised retries; one bad cluster shouldn't blow the whole
+  // batch and we want predictable wall time inside the 60s ceiling.
   for (const c of clusters) {
     // Fetch member titles for this cluster.
     const { data: memberRows, error: memberErr } = await supabase
