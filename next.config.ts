@@ -139,8 +139,10 @@ const nextConfig: NextConfig = {
  *     output so stack traces in the browser resolve to original sources.
  *   - `tunnelRoute` is left undefined; we'll only enable it if an ad-blocker
  *     starts swallowing Sentry events in the wild.
- *   - `hideSourceMaps: true` keeps the .map files off the public CDN — they
- *     still upload to Sentry, just not to `/_next/static/`.
+ *   - `sourcemaps.deleteSourcemapsAfterUpload: true` deletes generated .map
+ *     files from the build output after upload, keeping them off the public
+ *     CDN while still landing them in Sentry. (Sentry 10.x replacement for the
+ *     legacy `hideSourceMaps` flag.)
  *   - `disableLogger: true` strips Sentry's verbose client logger from
  *     production bundles.
  */
@@ -150,6 +152,8 @@ export default withSentryConfig(nextConfig, {
   authToken: process.env.SENTRY_AUTH_TOKEN,
   silent: !process.env.CI,
   widenClientFileUpload: true,
-  sourcemaps: { disable: true },
+  sourcemaps: {
+    deleteSourcemapsAfterUpload: true,
+  },
   disableLogger: true,
 });
