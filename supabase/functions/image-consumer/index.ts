@@ -34,6 +34,7 @@ import {
   fetchOgImage,
   isValidImageUrl,
 } from "../_shared/og-image.ts";
+import { requireServiceRoleBearer } from "../_shared/auth.ts";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -368,6 +369,11 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
 // ---------------------------------------------------------------------------
 
 Deno.serve(async (req) => {
+  // Bearer gate before any branch — the GET probe also returns infra detail
+  // ("configured", init errors) we do not want to leak anonymously.
+  const denied = requireServiceRoleBearer(req);
+  if (denied) return denied;
+
   // GET → cheap health probe (no DB hits).
   if (req.method === "GET") {
     return new Response(

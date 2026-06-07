@@ -25,6 +25,7 @@ import { fetchFeed } from "../_shared/rss/fetcher.ts";
 import type { RssSource } from "../_shared/rss/fetcher.ts";
 import type { NormalizedArticle } from "../_shared/rss/normalize.ts";
 import { normalizeArticles } from "../_shared/rss/normalize.ts";
+import { requireServiceRoleBearer } from "../_shared/auth.ts";
 import { createServiceClient } from "../_shared/supabase.ts";
 
 // ---------------------------------------------------------------------------
@@ -218,6 +219,9 @@ Deno.serve(async (req) => {
   // reach this — Supabase Edge Functions sit behind a service-role bearer
   // gate by default, so an explicit allowlist here is a defence-in-depth
   // step rather than the primary access control.
+  const denied = requireServiceRoleBearer(req);
+  if (denied) return denied;
+
   if (req.method !== "POST" && req.method !== "GET") {
     return new Response("method not allowed", { status: 405 });
   }

@@ -23,6 +23,7 @@ import {
   type PgmqMessage,
   readBatch,
 } from "../_shared/pgmq.ts";
+import { requireServiceRoleBearer } from "../_shared/auth.ts";
 import { createServiceClient, type SupabaseClient } from "../_shared/supabase.ts";
 import {
   fingerprint,
@@ -1004,6 +1005,13 @@ async function drainQueue(): Promise<InvocationSummary> {
 // ---------------------------------------------------------------------------
 
 Deno.serve(async (req: Request) => {
+  // Defence-in-depth: require an explicit service-role bearer before any
+  // method-routing or body-parsing logic runs. Returns a deterministic
+  // JSON-shaped 401 so a misdeploy with `--no-verify-jwt` does not silently
+  // expose the worker drain endpoint.
+  const denied = requireServiceRoleBearer(req);
+  if (denied) return denied;
+
   // pg_cron will fire a POST; manual triggers (Supabase dashboard) use GET.
   // Both should drive the same drain path.
   if (req.method !== "POST" && req.method !== "GET") {
