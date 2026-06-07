@@ -1,6 +1,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
+// next/server mock.
+//
+// The health route awaits `connection()` (directly or via shared helpers) so
+// Next.js 16's cache-components prerender doesn't choke on `request.headers`.
+// Outside a Next.js request scope (i.e. here in vitest) the real
+// `connection()` throws "called outside a request scope" — resolve it to a
+// no-op so the handler can run end-to-end and we exercise the real status
+// envelope instead of a 500-for-wrong-reason. Everything else from
+// `next/server` (NextResponse, etc.) passes through untouched via
+// `importOriginal`.
+// ---------------------------------------------------------------------------
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return {
+    ...actual,
+    connection: async () => {},
+  };
+});
+
+// ---------------------------------------------------------------------------
 // Supabase mock plumbing.
 //
 // The health route calls:
@@ -156,9 +176,9 @@ afterEach(() => {
   vi.resetModules();
 });
 
-async function callGet() {
+async function callGet(request?: Request) {
   const mod = await import("@/app/api/health/route");
-  const res = await mod.GET();
+  const res = await mod.GET(request);
   const body = await res.json();
   return { status: res.status, body };
 }
@@ -356,5 +376,72 @@ describe("GET /api/health", () => {
     expect(body.checks.queues.error).toMatch(/cluster_work/);
     expect(body.checks.database.ok).toBe(true);
     expect(body.checks.clustering.ok).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // R4-P5: anonymous rate limit on the public `{status}` envelope path.
+  //
+  // The route wraps the anonymous branch with a token-bucket limiter of
+  // capacity 30 / refill 1 per second. A flood from a single client IP
+  // gets the first 30 probes through (capacity drain) and then 429s the
+  // 31st within the same 1-second window. The authenticated bearer path
+  // is exempt — monitoring infra has a legitimate need to probe at high
+  // cadence with the right secret.
+  // ---------------------------------------------------------------------------
+
+  it("rate-limits anonymous callers: the 31st burst request in a 1s window returns 429", async () => {
+    // A unique client key isolates this bucket from any cross-test bleed
+    // inside the shared rate-limiter module map.
+    const clientIp = "203.0.113.77";
+    const buildReq = () =>
+      new Request("https://example.com/api/health", {
+        method: "GET",
+        headers: { "x-forwarded-for": clientIp },
+      });
+
+    // 31 concurrent requests in the same event-loop tick — the bucket
+    // refills by `elapsedSec * 1` between calls, which over a fraction of
+    // a millisecond is effectively zero. Capacity 30 means the first 30
+    // each consume a token and the 31st sees `tokens < 1`.
+    const results = await Promise.all(
+      Array.from({ length: 31 }, () => callGet(buildReq())),
+    );
+
+    const allowed = results.filter((r) => r.status !== 429);
+    const denied = results.filter((r) => r.status === 429);
+
+    expect(allowed.length).toBe(30);
+    expect(denied.length).toBe(1);
+
+    const limitedBody = denied[0]!.body as {
+      status: string;
+      retryAfterMs: number;
+    };
+    expect(limitedBody.status).toBe("rate_limited");
+    expect(typeof limitedBody.retryAfterMs).toBe("number");
+    expect(limitedBody.retryAfterMs).toBeGreaterThan(0);
+  });
+
+  it("authenticated bearer callers bypass the anonymous rate limit", async () => {
+    process.env.CRON_SECRET = "test-cron-secret";
+    const clientIp = "203.0.113.99";
+    const buildAuthedReq = () =>
+      new Request("https://example.com/api/health", {
+        method: "GET",
+        headers: {
+          "x-forwarded-for": clientIp,
+          authorization: "Bearer test-cron-secret",
+        },
+      });
+
+    // 35 > capacity 30. If the bearer path were subject to the limiter,
+    // at least 5 of these would 429. We expect zero.
+    const results = await Promise.all(
+      Array.from({ length: 35 }, () => callGet(buildAuthedReq())),
+    );
+    const denied = results.filter((r) => r.status === 429);
+    expect(denied.length).toBe(0);
+
+    delete process.env.CRON_SECRET;
   });
 });

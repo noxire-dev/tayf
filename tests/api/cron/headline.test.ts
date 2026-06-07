@@ -26,7 +26,21 @@ interface TableResponse {
 const DEFAULT_RESPONSE: TableResponse = { data: [], count: 0, error: null };
 
 const tableResponses: Record<string, TableResponse> = {};
-const updateCalls: Array<{ table: string; patch: unknown; eqId: string | null }> = [];
+
+// Real backing storage; the proxy below flushes the shared fake's mutation
+// log into this array on every property access so assertions never see a
+// stale snapshot.
+const _updateCallsStore: Array<{
+  table: string;
+  patch: unknown;
+  eqId: string | null;
+}> = [];
+const updateCalls = new Proxy(_updateCallsStore, {
+  get(target, prop, recv) {
+    flushUpdateCalls();
+    return Reflect.get(target, prop, recv);
+  },
+});
 
 function setTableResponse(table: string, response: TableResponse) {
   tableResponses[table] = { ...DEFAULT_RESPONSE, ...response };
@@ -54,42 +68,86 @@ vi.mock("node:crypto", async () => {
   };
 });
 
-vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => ({
-    from: (table: string) => {
-      const resp = () => tableResponses[table] ?? DEFAULT_RESPONSE;
-      let pendingEq: string | null = null;
-      const chain: Record<string, unknown> = {};
-      const terminal = (
-        onFul?: (v: TableResponse) => unknown,
-        onRej?: (e: unknown) => unknown,
-      ) => Promise.resolve(resp()).then(onFul, onRej);
-      Object.assign(chain, {
-        select: () => chain,
-        order: () => chain,
-        limit: () => chain,
-        is: () => chain,
-        eq: (_col: string, val: string) => {
-          pendingEq = val;
-          return chain;
-        },
-        in: () => chain,
-        not: () => chain,
-        update: (patch: unknown) => {
-          updateCalls.push({ table, patch, eqId: pendingEq });
-          return chain;
-        },
-        upsert: () => chain,
-        insert: () => chain,
-        delete: () => chain,
-        maybeSingle: async () => resp(),
-        single: async () => resp(),
-        then: terminal,
-      });
-      return chain;
+// The Supabase fake comes from the shared proxy-based factory under
+// `tests/_helpers/supabase-fake.ts` — every PostgREST chain method
+// (`.select()`, `.eq()`, `.gte()`, `.lte()`, `.is()`, `.in()`, `.range()`,
+// `.order()`, `.limit()`, `.update()`, `.upsert()`, `.insert()`,
+// `.delete()`, `.single()`, `.maybeSingle()`, `then`/`catch`/`finally`)
+// returns the proxy until the terminal `await` resolves to a `{data,error}`
+// envelope. The legacy `tableResponses` / `updateCalls` arrays still drive
+// the per-test data + assertions; bridges below map between the proxy fake
+// and the legacy test surface.
+const supabaseFake = await vi.hoisted(async () => {
+  // Async hoisted factory; dynamic `import()` resolves `.ts` under
+  // vitest's loader (CommonJS `require` does not).
+  const helper = await import("../../_helpers/supabase-fake");
+  const tableData: Record<string, {
+    data?: unknown;
+    count?: number | null;
+    error?: { message: string } | null;
+  }> = {};
+  const fake = helper.createSupabaseFake({
+    tables: {
+      clusters: (_state) => {
+        const r = tableData["clusters"] ?? { data: [], count: 0, error: null };
+        return {
+          data: r.data ?? [],
+          error: r.error ?? null,
+          count: r.count ?? null,
+        };
+      },
+      cluster_articles: (_state) => {
+        const r =
+          tableData["cluster_articles"] ?? { data: [], count: 0, error: null };
+        return {
+          data: r.data ?? [],
+          error: r.error ?? null,
+          count: r.count ?? null,
+        };
+      },
     },
-  }),
+  });
+  return { fake, tableData };
+});
+
+vi.mock("@supabase/supabase-js", () => ({
+  createClient: () => {
+    const innerClient = supabaseFake.fake.client as {
+      from: (t: string) => unknown;
+      rpc: (n: string, a?: unknown) => Promise<unknown>;
+      auth: unknown;
+    };
+    return {
+      from: (table: string) => {
+        // Mirror the outer `tableResponses` into the hoisted resolver map so
+        // each test's `setTableResponse(...)` is visible to the fake.
+        for (const k of Object.keys(supabaseFake.tableData))
+          delete supabaseFake.tableData[k];
+        for (const [k, v] of Object.entries(tableResponses))
+          supabaseFake.tableData[k] = v;
+        return innerClient.from(table);
+      },
+      rpc: (...a: unknown[]) => innerClient.rpc(a[0] as string, a[1]),
+      auth: innerClient.auth,
+    };
+  },
 }));
+
+// Bridge: drain the shared fake's mutation log into the legacy
+// `_updateCallsStore` shape. Called from the `updateCalls` Proxy on every
+// property access so the assertions see every write the route issued —
+// independent of whether the chain's terminal `then` was intercepted.
+function flushUpdateCalls(): void {
+  const log = supabaseFake.fake.calls.mutations;
+  for (let i = _updateCallsStore.length; i < log.length; i++) {
+    const m = log[i];
+    if (m.op !== "update") continue;
+    const eqId =
+      (m.state.eq.find((p) => p.col === "id")?.val as string | undefined) ??
+      null;
+    _updateCallsStore.push({ table: m.table, patch: m.patch, eqId });
+  }
+}
 
 // LLM client interception. The headline route talks to Anthropic's
 // `/v1/messages` endpoint over plain `fetch` (no vendored SDK), so we
@@ -143,7 +201,11 @@ beforeEach(() => {
   process.env.ANTHROPIC_API_KEY = "sk-ant-test";
   delete process.env.CRON_SECRET;
   for (const k of Object.keys(tableResponses)) delete tableResponses[k];
-  updateCalls.length = 0;
+  _updateCallsStore.length = 0;
+  // Reset the shared Supabase fake's mutation log so each test observes
+  // only its own writes.
+  supabaseFake.fake.calls.mutations.length = 0;
+  supabaseFake.fake.calls.rpc.length = 0;
   timingSafeEqualSpy.mockClear();
   installLlmFetchSpy();
 });
@@ -238,15 +300,35 @@ describe("GET /api/cron/headline", () => {
   it("calls the LLM and writes title_tr_neutral when clusters lack one", async () => {
     process.env.CRON_SECRET = "shhh";
     // ANTHROPIC_API_KEY is set in beforeEach.
+    // Cluster needs `article_count >= MIN_ARTICLE_COUNT` (3) to pass the
+    // `.gte("article_count", MIN_ARTICLE_COUNT)` filter on the candidate
+    // query. `title_neutral_at` null marks it as needing rewrite.
     setTableResponse("clusters", {
       data: [
         {
           id: "c1",
+          title_tr: "Original TR",
+          summary_tr: "Original summary",
           title_tr_neutral: null,
-          articles: [
-            { title: "Headline A", source: "src1" },
-            { title: "Headline B", source: "src2" },
-          ],
+          title_neutral_at: null,
+          article_count: 4,
+        },
+      ],
+      error: null,
+    });
+    // Member titles are fetched via cluster_articles -> articles join. The
+    // shared fake returns the table fixture verbatim; the join shape
+    // mirrors what the supabase-js typed query produces.
+    setTableResponse("cluster_articles", {
+      data: [
+        {
+          articles: { title: "Headline A", published_at: "2026-01-01T00:00:00Z" },
+        },
+        {
+          articles: { title: "Headline B", published_at: "2026-01-02T00:00:00Z" },
+        },
+        {
+          articles: { title: "Headline C", published_at: "2026-01-03T00:00:00Z" },
         },
       ],
       error: null,
@@ -264,16 +346,19 @@ describe("GET /api/cron/headline", () => {
       }),
     );
     expect(res.status).toBe(200);
-    // If the route writes anything back, it should target the clusters table
-    // with a `title_tr_neutral` patch. We don't insist on a specific count —
-    // some implementations may batch, some may issue per-row updates.
-    if (updateCalls.length > 0) {
-      const cluster = updateCalls.find((u) => u.table === "clusters");
-      if (cluster) {
-        const patch = cluster.patch as { title_tr_neutral?: string };
-        expect(patch.title_tr_neutral).toBeDefined();
-      }
-    }
+    // Tripwire (R4-P3): the route MUST have written back a
+    // non-null `title_tr_neutral`. Soft-conditional asserts that the
+    // previous version of this test used silently green-passed when the
+    // chain fake didn't carry the `.gte()` method; the proxy fake makes
+    // the chain Just Work, so this assertion now bites if the route
+    // regresses or the fake silently no-ops the write path.
+    const clusterUpdate = updateCalls.find((u) => u.table === "clusters");
+    expect(clusterUpdate).toBeDefined();
+    const patch = clusterUpdate!.patch as { title_tr_neutral?: unknown };
+    expect(patch.title_tr_neutral).toBeDefined();
+    expect(patch.title_tr_neutral).not.toBeNull();
+    expect(typeof patch.title_tr_neutral).toBe("string");
+    expect((patch.title_tr_neutral as string).length).toBeGreaterThan(0);
   });
 
   it("uses a constant-time comparator (no timing leak via early-exit on first byte)", async () => {

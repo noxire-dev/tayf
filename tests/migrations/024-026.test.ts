@@ -41,30 +41,23 @@ function read(name: string): string {
 describe("migration 024_pgmq_setup.sql (static)", () => {
   let sql = "";
   beforeAll(() => {
-    try {
-      sql = read("024_pgmq_setup.sql");
-    } catch {
-      sql = "";
-    }
+    sql = read("024_pgmq_setup.sql");
+    expect(sql.length).toBeGreaterThan(0);
   });
 
   it("creates the pgmq extension", () => {
-    if (!sql) return;
     expect(sql).toMatch(/CREATE\s+EXTENSION\s+IF\s+NOT\s+EXISTS\s+pgmq/i);
   });
 
   it("creates the cluster_work queue", () => {
-    if (!sql) return;
     expect(sql).toMatch(/pgmq\.create\(\s*'cluster_work'\s*\)/i);
   });
 
   it("creates the image_backfill queue", () => {
-    if (!sql) return;
     expect(sql).toMatch(/pgmq\.create\(\s*'image_backfill'\s*\)/i);
   });
 
   it("creates a worker_checkpoint table for safety-net consumer modes", () => {
-    if (!sql) return;
     expect(sql).toMatch(/create\s+table[^;]*worker_checkpoint/i);
     // Round-2 fix: articles.id is uuid, so the resume marker is a uuid column
     // named last_seen_article_id (see 024_pgmq_setup.sql).
@@ -75,12 +68,10 @@ describe("migration 024_pgmq_setup.sql (static)", () => {
   });
 
   it("exposes a worker_metrics view (read-only surface for /api/health)", () => {
-    if (!sql) return;
     expect(sql).toMatch(/create\s+(or\s+replace\s+)?view\s+worker_metrics/i);
   });
 
   it("revokes pgmq function access from anon / authenticated", () => {
-    if (!sql) return;
     expect(sql).toMatch(/revoke[^;]*from\s+(anon|authenticated)/i);
   });
 });
@@ -88,67 +79,63 @@ describe("migration 024_pgmq_setup.sql (static)", () => {
 describe("migration 025_worker_triggers.sql (static)", () => {
   let sql = "";
   beforeAll(() => {
-    try {
-      sql = read("025_worker_triggers.sql");
-    } catch {
-      sql = "";
-    }
+    sql = read("025_worker_triggers.sql");
+    expect(sql.length).toBeGreaterThan(0);
   });
 
   it("defines the cluster_work enqueue trigger AFTER INSERT on articles", () => {
-    if (!sql) return;
     expect(sql).toMatch(
       /after\s+insert\s+on\s+articles[\s\S]+execute\s+function\s+enqueue_cluster_work/i,
     );
   });
 
   it("defines the image_backfill enqueue trigger AFTER INSERT on articles", () => {
-    if (!sql) return;
     expect(sql).toMatch(
       /after\s+insert\s+on\s+articles[\s\S]+execute\s+function\s+enqueue_image_backfill/i,
     );
   });
 
   it("scopes cluster_work to the politics whitelist (politika / son_dakika)", () => {
-    if (!sql) return;
     expect(sql).toMatch(/politika/);
     expect(sql).toMatch(/son_dakika/);
   });
 
   it("guards image_backfill on NEW.image_url IS NULL (skip rows that already have images)", () => {
-    if (!sql) return;
     expect(sql).toMatch(/NEW\.image_url\s+is\s+(not\s+)?null/i);
   });
 
   it("is idempotent — drops triggers before recreating", () => {
-    if (!sql) return;
     expect(sql).toMatch(/drop\s+trigger\s+if\s+exists\s+articles_cluster_enqueue/i);
     expect(sql).toMatch(/drop\s+trigger\s+if\s+exists\s+articles_image_enqueue/i);
+  });
+
+  it("grants pgmq.send EXECUTE to the SECURITY DEFINER owner roles (postgres, supabase_admin)", () => {
+    // Round-4 fix: the SECURITY DEFINER trigger functions invoke pgmq.send
+    // under the function-owner identity; without this grant the trigger
+    // fails with "permission denied for function pgmq.send" on any
+    // non-service_role owner. Tripwire: removing this block silently
+    // regresses Round-3 P1 (SECURITY DEFINER grant propagation risk).
+    expect(sql).toMatch(/grant\s+execute\s+on\s+function[\s\S]+pgmq[\s\S]+postgres/i);
+    expect(sql).toMatch(/supabase_admin/);
   });
 });
 
 describe("migration 026_unify_content_hash_v2.sql (static)", () => {
   let sql = "";
   beforeAll(() => {
-    try {
-      sql = read("026_unify_content_hash_v2.sql");
-    } catch {
-      sql = "";
-    }
+    sql = read("026_unify_content_hash_v2.sql");
+    expect(sql.length).toBeGreaterThan(0);
   });
 
   it("backfills any row whose content_hash is 64 hex chars (sha256 regime)", () => {
-    if (!sql) return;
     expect(sql).toMatch(/length\(content_hash\)\s*=\s*64/i);
   });
 
   it("adds a CHECK constraint enforcing 40-char sha1 hashes going forward", () => {
-    if (!sql) return;
     expect(sql).toMatch(/check\s*\([^)]*length\(content_hash\)\s*=\s*40/i);
   });
 
   it("does NOT drop the UNIQUE constraint on (source_id, content_hash)", () => {
-    if (!sql) return;
     // Negative assertion: refusing to drop the dedup key.
     expect(sql).not.toMatch(/drop\s+constraint[^;]*source_id[^;]*content_hash/i);
   });

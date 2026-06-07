@@ -1,6 +1,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
+// next/server mock.
+//
+// The metrics route awaits `connection()` (directly or via shared helpers) so
+// Next.js 16's cache-components prerender doesn't choke on `request.headers`.
+// Outside a Next.js request scope (i.e. here in vitest) the real
+// `connection()` throws "called outside a request scope" — resolve it to a
+// no-op so the handler can run end-to-end and we exercise the real count
+// envelope instead of a 500-for-wrong-reason. Everything else from
+// `next/server` (NextResponse, etc.) passes through untouched via
+// `importOriginal`.
+// ---------------------------------------------------------------------------
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return {
+    ...actual,
+    connection: async () => {},
+  };
+});
+
+// ---------------------------------------------------------------------------
 // Supabase mock plumbing for /api/metrics.
 //
 // The route issues Promise.all over ten count queries. Each one starts with

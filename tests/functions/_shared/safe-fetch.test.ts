@@ -281,4 +281,26 @@ describe("safeFetch", () => {
     expect(result.status).toBe(200);
     expect(result.body).toContain("<title>ok</title>");
   });
+
+  // Round-4 regression: pre-fix, isPrivateAddress returned the truthy string
+  // "unparseable address" for any non-IP input, so assertHostnameIsPublic's
+  // literal-IP fast path mis-classified "example.com" as a "literal IP in
+  // blocked range" and safeFetch rejected every hostname before DNS ran. The
+  // fix returns null for non-literal input and skips the fast path entirely
+  // unless the hostname actually parses as a v4 / v6 literal.
+  it("does NOT throw on a regular hostname URL when DNS resolves to a public IP (regression)", async () => {
+    stubResolveDns(["93.184.215.14"]);
+    queueFetchResponses([
+      new Response(
+        '<html><head><meta property="og:image" content="https://cdn.example.com/cover.jpg" /></head></html>',
+        { status: 200, headers: { "Content-Type": "text/html" } },
+      ),
+    ]);
+
+    const result = await safeFetch(
+      new URL("https://example.com/feed.xml").toString(),
+    );
+    expect(result.status).toBe(200);
+    expect(result.body).toContain("og:image");
+  });
 });

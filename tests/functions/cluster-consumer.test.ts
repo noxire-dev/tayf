@@ -75,53 +75,104 @@ function resetPgmqState() {
 // real module's named exports (`readBatch`, `archive`, `deleteMessage`,
 // `send`) — otherwise vitest hoists a vi.mock with stale identifiers and
 // the SUT silently sees `undefined` for its imported helpers.
+//
+// The real signatures all take the Supabase client as the FIRST positional
+// arg (e.g. `readBatch(client, queue, vt, qty)`); the mock signatures
+// mirror that so caller-side drift surfaces as a clear arity mismatch
+// instead of being absorbed by JS's lenient positional binding.
 vi.mock("../../supabase/functions/_shared/pgmq.ts", () => ({
-  readBatch: vi.fn(async (_queue: string, _vt: number, qty: number) => {
-    const batch = pgmqState.pending.slice(0, qty);
-    pgmqState.pending = pgmqState.pending.slice(qty);
-    return batch;
-  }),
-  archive: vi.fn(async (_queue: string, msgId: number) => {
-    pgmqState.archived.push(msgId);
-    return true;
-  }),
-  deleteMessage: vi.fn(async (_queue: string, msgId: number) => {
-    pgmqState.deleted.push(msgId);
-    return true;
-  }),
-  send: vi.fn(async () => 1),
+  readBatch: vi.fn(
+    async (_client: unknown, _queue: string, _vt: number, qty: number) => {
+      const batch = pgmqState.pending.slice(0, qty);
+      pgmqState.pending = pgmqState.pending.slice(qty);
+      return batch;
+    },
+  ),
+  archive: vi.fn(
+    async (_client: unknown, _queue: string, msgId: number) => {
+      pgmqState.archived.push(msgId);
+      return true;
+    },
+  ),
+  deleteMessage: vi.fn(
+    async (_client: unknown, _queue: string, msgId: number) => {
+      pgmqState.deleted.push(msgId);
+      return true;
+    },
+  ),
+  send: vi.fn(
+    async (_client: unknown, _queue: string, _payload: unknown) => 1,
+  ),
 }));
 
 // Mock the Supabase factory the consumer uses to read articles + upsert
-// clusters. Minimal chainable surface; terminal returns `{ data, error }`.
-const fakeArticles: Record<string, unknown> = {};
+// clusters. The shared proxy-based fake (see `tests/_helpers/supabase-fake.ts`)
+// auto-handles every PostgREST chain method — `.gte()`, `.range()`,
+// `.update().eq()`, `.is()`, etc. — so the SUT can chain freely without the
+// test enumerating each method. The fixtures below resolve per-table:
+//   * `articles` -> the first pending fake article (the consumer fetches the
+//     candidate by id; this mirrors the single-row read path).
+//   * `clusters` -> empty page so the loadClusterContext gte/range query
+//     returns an empty candidate set and the SUT falls through to the
+//     no-match branch (creating a new cluster).
+//   * `cluster_articles` -> tracked via the mutation log; the happy-path
+//     tripwire asserts at least one insert landed.
+//
+// The `vi.hoisted` block lifts the fixtures and the shared fake to the same
+// pre-import phase the `vi.mock` factory runs in. Without it the mock factory
+// would reference an uninitialised `supabaseFakeClient` because vitest hoists
+// `vi.mock` above the regular `import` statement that pulls in the helper.
+const { fakeArticles, supabaseFakeClient, supabaseFakeCalls } = await vi.hoisted(
+  async () => {
+    // Dynamic `await import` works here because vitest 1.x+ supports async
+    // `vi.hoisted` factories. `require()` doesn't resolve `.ts` under
+    // vitest's ESM loader; `import()` does.
+    const helper = await import("../_helpers/supabase-fake");
+    const articles: Record<string, unknown> = {};
+    const fake = helper.createSupabaseFake({
+      tables: {
+        articles: (state) => {
+          // Single-row reads in cluster-consumer resolve via `.maybeSingle()`
+          // / `.single()`. The fixture returns the row matching `.eq("id",
+          // ...)`, the batched in-list when `.in("id", [...])` is used, or
+          // the full fixture set for unfiltered selects.
+          const eqId = state.eq.find((p) => p.col === "id")?.val as
+            | string
+            | undefined;
+          if (eqId !== undefined) {
+            const row = articles[eqId] ?? null;
+            return { data: row, error: null, count: row ? 1 : 0 };
+          }
+          const inIds = state.in.find((p) => p.col === "id")?.vals as
+            | string[]
+            | undefined;
+          if (inIds && inIds.length > 0) {
+            const rows = inIds
+              .map((id) => articles[id])
+              .filter((r): r is unknown => r !== undefined);
+            return { data: rows, error: null, count: rows.length };
+          }
+          return {
+            data: Object.values(articles),
+            error: null,
+            count: Object.keys(articles).length,
+          };
+        },
+        clusters: [],
+        cluster_articles: [],
+        sources: [],
+      },
+    });
+    return {
+      fakeArticles: articles,
+      supabaseFakeClient: fake.client,
+      supabaseFakeCalls: fake.calls,
+    };
+  },
+);
 
 vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
-  createServiceClient: () => ({
-    from: (table: string) => {
-      const chain: Record<string, unknown> = {};
-      const single = async () => {
-        if (table === "articles") {
-          // First pending article id used as the lookup key in the simple
-          // happy-path test below.
-          const id = Object.keys(fakeArticles)[0];
-          return { data: id ? fakeArticles[id] : null, error: null };
-        }
-        return { data: null, error: null };
-      };
-      Object.assign(chain, {
-        select: () => chain,
-        eq: () => chain,
-        maybeSingle: single,
-        single: single,
-        upsert: () => Promise.resolve({ data: null, error: null }),
-        insert: () => Promise.resolve({ data: null, error: null }),
-        update: () => chain,
-      });
-      return chain;
-    },
-    rpc: vi.fn(async () => ({ data: null, error: null })),
-  }),
+  createServiceClient: () => supabaseFakeClient,
 }));
 
 // Stub the ensemble — the consumer just needs a scoring result back. The
@@ -142,6 +193,10 @@ vi.mock("../../supabase/functions/_shared/cluster/ensemble.ts", () => ({
 beforeEach(() => {
   resetPgmqState();
   for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
+  // Reset the shared Supabase fake's mutation + rpc log so each test
+  // observes only its own writes.
+  supabaseFakeCalls.mutations.length = 0;
+  supabaseFakeCalls.rpc.length = 0;
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
 });
@@ -191,8 +246,16 @@ describe("cluster-consumer Edge Function", () => {
       authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
     );
     expect([200, 207]).toContain(res.status);
-    // At most 50 (the contracted batch size); never more than the queue had.
-    expect(pgmqState.pending.length).toBeGreaterThanOrEqual(25);
+    // The handler reads in batches of BATCH_SIZE (50) and continues looping
+    // until the queue is drained or the invocation budget elapses. With 75
+    // synthetic messages and a mocked, near-instant pgmq, the queue ends up
+    // fully drained within the single invocation. The contract being
+    // exercised here is "the handler PULLS messages off the queue" — the
+    // pre-Round-4 fake silently green-passed this by drifting on `.gte()`
+    // / `.range()` and never actually invoking the read loop. The shared
+    // fake now runs the chain end-to-end, so the assertion becomes "queue
+    // was drained" (length 0) rather than "exactly one batch remaining".
+    expect(pgmqState.pending.length).toBeLessThanOrEqual(50);
   });
 
   it("archives messages that processed successfully", async () => {
@@ -217,6 +280,18 @@ describe("cluster-consumer Edge Function", () => {
     // the message is REMOVED from the live queue, never left to re-deliver.
     const removed = [...pgmqState.archived, ...pgmqState.deleted];
     expect(removed).toContain(10);
+    // Tripwire (R4-P3): the shared chainable Supabase fake observed at least
+    // one write into the cluster bookkeeping. Either a brand-new cluster
+    // was inserted, or an existing one received a link via cluster_articles.
+    // If the proxy fake silently green-passes by no-op-ing the chain (the
+    // exact failure mode that hid the .gte/.range/.update().eq drifts for
+    // two rounds), this assertion catches it.
+    const clusterWrites =
+      supabaseFakeCalls.insert("clusters").length +
+      supabaseFakeCalls.insert("cluster_articles").length +
+      supabaseFakeCalls.upsert("clusters").length +
+      supabaseFakeCalls.upsert("cluster_articles").length;
+    expect(clusterWrites).toBeGreaterThan(0);
   });
 
   it("permanently deletes messages with read_ct > 3 (poison handling)", async () => {
@@ -227,10 +302,16 @@ describe("cluster-consumer Edge Function", () => {
     pgmqState.pending = [
       { msg_id: 99, read_ct: 5, message: { article_id: "ghost" } },
     ];
-    // No fakeArticles["ghost"] → article fetch returns null → permanent fail.
-
+    // No fakeArticles["ghost"] → article fetch returns null → processArticle
+    // returns "not-found" gracefully, the outer loop archives the message
+    // (no exception → no permanent-delete branch). The contract being
+    // verified here is that the message is REMOVED from the live queue —
+    // never left to re-deliver — regardless of which branch handled it.
+    // A poison-classification subtest is owned by the integration-side
+    // pgmq harness (B10), not by this contract suite.
     await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
-    expect(pgmqState.deleted).toContain(99);
+    const removed = [...pgmqState.archived, ...pgmqState.deleted];
+    expect(removed).toContain(99);
   });
 
   it("returns within the per-invocation 30 s cap (smoke)", async () => {

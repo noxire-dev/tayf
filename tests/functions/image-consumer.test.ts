@@ -60,61 +60,142 @@ function resetPgmqState() {
 
 // Names mirror the real `_shared/pgmq.ts` exports (`readBatch`, `archive`,
 // `deleteMessage`, `send`); any drift means the SUT silently sees undefined.
+//
+// Signatures take the Supabase client as the leading positional arg —
+// matching the real module's `readBatch(client, queue, vt, qty)` etc. —
+// so a caller-side drift surfaces as a clear arity mismatch instead of
+// being absorbed by JS's lenient positional binding.
 vi.mock("../../supabase/functions/_shared/pgmq.ts", () => ({
-  readBatch: vi.fn(async (_queue: string, _vt: number, qty: number) => {
-    const batch = pgmqState.pending.slice(0, qty);
-    pgmqState.pending = pgmqState.pending.slice(qty);
-    return batch;
-  }),
-  archive: vi.fn(async (_queue: string, msgId: number) => {
-    pgmqState.archived.push(msgId);
-    return true;
-  }),
-  deleteMessage: vi.fn(async (_queue: string, msgId: number) => {
-    pgmqState.deleted.push(msgId);
-    return true;
-  }),
-  send: vi.fn(async () => 1),
+  readBatch: vi.fn(
+    async (_client: unknown, _queue: string, _vt: number, qty: number) => {
+      const batch = pgmqState.pending.slice(0, qty);
+      pgmqState.pending = pgmqState.pending.slice(qty);
+      return batch;
+    },
+  ),
+  archive: vi.fn(
+    async (_client: unknown, _queue: string, msgId: number) => {
+      pgmqState.archived.push(msgId);
+      return true;
+    },
+  ),
+  deleteMessage: vi.fn(
+    async (_client: unknown, _queue: string, msgId: number) => {
+      pgmqState.deleted.push(msgId);
+      return true;
+    },
+  ),
+  send: vi.fn(
+    async (_client: unknown, _queue: string, _payload: unknown) => 1,
+  ),
 }));
 
-// Supabase mock: articles table is keyed by id; updates record the image_url.
-const fakeArticles: Record<string, { url: string; image_url?: string | null }> = {};
-const articleUpdates: Array<{ id: string; image_url: string | null }> = [];
+// Supabase mock: the shared proxy-based fake (see
+// `tests/_helpers/supabase-fake.ts`) auto-handles every PostgREST chain
+// method — `.select().eq().maybeSingle()`, `.update().eq()`, `.upsert()`,
+// `.in()`, `.range()`, etc. — without the test having to enumerate each
+// method. The fake's mutation log is mirrored into the legacy
+// `articleUpdates` array shape so the existing tripwires
+// (`expect(articleUpdates).toContainEqual({...})`,
+// `expect(articleUpdates.length).toBeGreaterThan(0)`) keep working
+// unmodified.
+const fakeArticles: Record<string, { url: string; image_url?: string | null }> =
+  {};
+
+// Real backing storage for the article-updates log. The bridge function
+// below flushes the shared fake's mutation log into this array; the
+// exported `articleUpdates` is a Proxy that flushes before any read so
+// assertions never miss in-flight writes.
+const _articleUpdatesStore: Array<{ id: string; image_url: string | null }> =
+  [];
+const articleUpdates = new Proxy(_articleUpdatesStore, {
+  get(target, prop, recv) {
+    // Lazy flush on any read. Cheap (O(n) over the mutation log) and
+    // guarantees assertions like `articleUpdates.length` or
+    // `articleUpdates.toContainEqual(...)` see every write the SUT issued.
+    flushArticleUpdates();
+    return Reflect.get(target, prop, recv);
+  },
+});
+
+const supabaseFake = await vi.hoisted(async () => {
+  // `vi.hoisted` runs before regular imports; vitest 1.x+ supports async
+  // factories, and dynamic `import()` resolves `.ts` under vitest's loader
+  // (CommonJS `require` does not).
+  const helper = await import("../_helpers/supabase-fake");
+  const articlesFixture: Record<
+    string,
+    { url: string; image_url?: string | null }
+  > = {};
+  const fake = helper.createSupabaseFake({
+    tables: {
+      articles: (state) => {
+        const eqId = state.eq.find((p) => p.col === "id")?.val as
+          | string
+          | undefined;
+        if (eqId !== undefined) {
+          const row = articlesFixture[eqId] ?? null;
+          return { data: row, error: null, count: row ? 1 : 0 };
+        }
+        const inIds = state.in.find((p) => p.col === "id")?.vals as
+          | string[]
+          | undefined;
+        if (inIds && inIds.length > 0) {
+          const rows = inIds
+            .map((id) => articlesFixture[id])
+            .filter(
+              (r): r is { url: string; image_url?: string | null } =>
+                r !== undefined,
+            );
+          return { data: rows, error: null, count: rows.length };
+        }
+        return { data: [], error: null, count: 0 };
+      },
+      sources: [],
+    },
+  });
+  return { fake, articlesFixture };
+});
+
+// Bridge: drain the shared fake's mutation log into the legacy
+// `_articleUpdatesStore` array shape. Called from the Proxy's getter so
+// every read of `articleUpdates` sees the latest writes the SUT issued.
+function flushArticleUpdates(): void {
+  const log = supabaseFake.fake.calls.update("articles");
+  for (let i = _articleUpdatesStore.length; i < log.length; i++) {
+    const m = log[i];
+    const id = m.state.eq.find((p) => p.col === "id")?.val as
+      | string
+      | undefined;
+    if (!id) continue;
+    const patch = (m.patch ?? {}) as { image_url?: string | null };
+    _articleUpdatesStore.push({ id, image_url: patch.image_url ?? null });
+  }
+}
 
 vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
-  createServiceClient: () => ({
-    from: (_table: string) => {
-      let pendingId: string | null = null;
-      const chain: Record<string, unknown> = {};
-      Object.assign(chain, {
-        select: () => chain,
-        eq: (col: string, val: string) => {
-          if (col === "id") pendingId = val;
-          return chain;
-        },
-        maybeSingle: async () => ({
-          data: pendingId ? fakeArticles[pendingId] ?? null : null,
-          error: null,
-        }),
-        single: async () => ({
-          data: pendingId ? fakeArticles[pendingId] ?? null : null,
-          error: null,
-        }),
-        update: (patch: Record<string, unknown>) => {
-          if (pendingId) {
-            articleUpdates.push({
-              id: pendingId,
-              image_url: (patch.image_url as string) ?? null,
-            });
-          }
-          return Promise.resolve({ data: null, error: null });
-        },
-        upsert: () => Promise.resolve({ data: null, error: null }),
-      });
-      return chain;
-    },
-    rpc: vi.fn(async () => ({ data: null, error: null })),
-  }),
+  createServiceClient: () => {
+    const innerClient = supabaseFake.fake.client as {
+      from: (t: string) => unknown;
+      rpc: (n: string, a?: unknown) => Promise<unknown>;
+      auth: unknown;
+    };
+    return {
+      from: (table: string) => {
+        // Sync the test-supplied fixture rows into the hoisted resolver
+        // map every time the SUT begins a chain so freshly-added articles
+        // are visible to the resolver. The hoisted closure can't read the
+        // outer `fakeArticles` directly because it captures its own scope.
+        for (const k of Object.keys(supabaseFake.articlesFixture))
+          delete supabaseFake.articlesFixture[k];
+        for (const [k, v] of Object.entries(fakeArticles))
+          supabaseFake.articlesFixture[k] = v;
+        return innerClient.from(table);
+      },
+      rpc: (...a: unknown[]) => innerClient.rpc(a[0] as string, a[1]),
+      auth: innerClient.auth,
+    };
+  },
 }));
 
 // Mock the SSRF-safe fetch. The error class name must match what
@@ -128,9 +209,25 @@ class SafeFetchError extends Error {
   }
 }
 
+// Per-test toggle controlling whether the SUT calls the real safe-fetch
+// (with Deno.resolveDns + globalThis.fetch stubbed at the global level) or
+// the cheap deny-list stub. Default is the stub so the rest of the suite
+// stays hermetic and fast; the "real safe-fetch end-to-end happy path"
+// test below sets `useRealSafeFetch.value = true` so its single message
+// goes through the actual module surface (Round-4 R4-P1).
+const safeFetchToggle = vi.hoisted(() => ({
+  useReal: false,
+  realSafeFetch: null as
+    | ((url: string, opts?: unknown) => Promise<unknown>)
+    | null,
+}));
+
 vi.mock("../../supabase/functions/_shared/safe-fetch.ts", () => ({
   SafeFetchError,
   safeFetch: vi.fn(async (url: string, init?: RequestInit) => {
+    if (safeFetchToggle.useReal && safeFetchToggle.realSafeFetch) {
+      return safeFetchToggle.realSafeFetch(url, init);
+    }
     // Block any URL pointing at link-local, RFC1918, or loopback hosts.
     if (
       /https?:\/\/169\.254\./.test(url) ||
@@ -142,7 +239,13 @@ vi.mock("../../supabase/functions/_shared/safe-fetch.ts", () => ({
     ) {
       throw new SafeFetchError(`blocked: ${url}`, "SSRF_BLOCKED");
     }
-    return globalThis.fetch(url, init);
+    const res = await globalThis.fetch(url, init);
+    return {
+      status: res.status,
+      headers: res.headers,
+      body: await res.text(),
+      finalUrl: url,
+    };
   }),
 }));
 
@@ -151,22 +254,67 @@ vi.mock("../../supabase/functions/_shared/safe-fetch.ts", () => ({
 // real module: `fetchOgImage` (async, fetches the article HTML and pulls
 // the og:image URL), `fetchHeroImage` (fallback chain), and the
 // `isValidImageUrl` guard. The SUT imports them by name.
-vi.mock("../../supabase/functions/_shared/og-image.ts", () => {
+vi.mock("../../supabase/functions/_shared/og-image.ts", async () => {
+  // Pull the mocked safeFetch through the standard module path so the SUT
+  // and these helpers share the same instance — and so flipping the
+  // safeFetchToggle (Round-4 R4-P1) routes both the SUT and the helpers
+  // through the real safe-fetch in the un-stubbed happy-path test.
+  const safeFetchModule = await import(
+    "../../supabase/functions/_shared/safe-fetch.ts"
+  );
   const ogImageFromHtml = (html: string): string | null => {
     const m =
       html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i) ||
       html.match(/<meta\s+name="twitter:image"\s+content="([^"]+)"/i);
     return m ? m[1] : null;
   };
+  // Validate the extracted og:image URL against the SSRF gate before
+  // returning it. The real `safeFetch` rejects private / link-local /
+  // metadata-host URLs and throws `SafeFetchError`; here we only need to
+  // run the URL through the same deny-list (a tiny HEAD-style probe) to
+  // mirror the contract that an SSRF-aware extractor enforces — the SUT
+  // writes `image_url` straight to the row, so the URL must already be
+  // safe by the time it leaves the extractor.
+  const validateImageUrl = async (
+    candidate: string | null,
+  ): Promise<string | null> => {
+    if (!candidate) return null;
+    try {
+      // Attempting to safeFetch the image URL exercises the deny-list;
+      // success means the host resolved to a public IP (or, in mock
+      // mode, didn't match the RFC1918 / link-local regex). Failure
+      // (SafeFetchError) means we drop the candidate.
+      await safeFetchModule.safeFetch(candidate);
+      return candidate;
+    } catch {
+      return null;
+    }
+  };
   const fetchOgImage = vi.fn(async (articleUrl: string) => {
-    const res = await globalThis.fetch(articleUrl);
-    if (!res.ok) return null;
-    return ogImageFromHtml(await res.text());
+    try {
+      const res = await safeFetchModule.safeFetch(articleUrl);
+      const body = typeof (res as { body?: unknown }).body === "string"
+        ? (res as { body: string }).body
+        : "";
+      const status = (res as { status?: number }).status ?? 200;
+      if (status < 200 || status >= 300) return null;
+      return await validateImageUrl(ogImageFromHtml(body));
+    } catch {
+      return null;
+    }
   });
   const fetchHeroImage = vi.fn(async (articleUrl: string) => {
-    const res = await globalThis.fetch(articleUrl);
-    if (!res.ok) return null;
-    return ogImageFromHtml(await res.text());
+    try {
+      const res = await safeFetchModule.safeFetch(articleUrl);
+      const body = typeof (res as { body?: unknown }).body === "string"
+        ? (res as { body: string }).body
+        : "";
+      const status = (res as { status?: number }).status ?? 200;
+      if (status < 200 || status >= 300) return null;
+      return await validateImageUrl(ogImageFromHtml(body));
+    } catch {
+      return null;
+    }
   });
   const isValidImageUrl = (u: unknown): u is string =>
     typeof u === "string" && /^https?:\/\//.test(u);
@@ -184,7 +332,12 @@ beforeEach(() => {
   resetPgmqState();
   for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
   for (const k of Object.keys(htmlResponses)) delete htmlResponses[k];
-  articleUpdates.length = 0;
+  _articleUpdatesStore.length = 0;
+  // Reset the shared Supabase fake's mutation log so each test observes
+  // only its own writes — the bridge above derives `articleUpdates` from
+  // this log on every read.
+  supabaseFake.fake.calls.mutations.length = 0;
+  supabaseFake.fake.calls.rpc.length = 0;
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
 
@@ -201,8 +354,18 @@ beforeEach(() => {
   }) as typeof fetch;
 });
 
+// Snapshot the original Deno stub installed at module load so the Round-4
+// R4-P1 happy-path test can swap in a resolveDns-capable replacement and
+// the suite-wide afterEach can restore the original shape for later tests.
+const originalDeno = (globalThis as unknown as { Deno: unknown }).Deno;
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  // Reset the Round-4 R4-P1 toggle so the next test re-enters with the
+  // cheap deny-list stub and the suite's original Deno stub shape.
+  safeFetchToggle.useReal = false;
+  safeFetchToggle.realSafeFetch = null;
+  (globalThis as unknown as { Deno: unknown }).Deno = originalDeno;
   vi.clearAllMocks();
 });
 
@@ -224,7 +387,11 @@ describe("image-consumer Edge Function", () => {
     expect(handler).toBeDefined();
     if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
-    fakeArticles["art-safe"] = { url: "https://news.example.com/story", image_url: null };
+    fakeArticles["art-safe"] = {
+      id: "art-safe",
+      url: "https://news.example.com/story",
+      image_url: null,
+    } as { url: string; image_url?: string | null };
     htmlResponses["https://news.example.com/story"] =
       '<html><head>' +
       '<meta property="og:image" content="https://cdn.example.com/cover.jpg" />' +
@@ -235,6 +402,10 @@ describe("image-consumer Edge Function", () => {
 
     await handler(authedRequest("http://localhost/image-consumer", { method: "POST" }));
 
+    // Tripwire (R4-P3): the chainable Supabase fake observed at least one
+    // article-row update on the happy path. If the proxy fake silently
+    // green-passes by no-op-ing the chain, this catches it.
+    expect(articleUpdates.length).toBeGreaterThan(0);
     expect(articleUpdates).toContainEqual({
       id: "art-safe",
       image_url: "https://cdn.example.com/cover.jpg",
@@ -242,12 +413,78 @@ describe("image-consumer Edge Function", () => {
     expect(pgmqState.archived).toContain(1);
   });
 
+  it("backfills a public og:image through the REAL safe-fetch module (Round-4 R4-P1 un-stub)", async () => {
+    // Replace the cheap deny-list stub with the actual safe-fetch
+    // implementation for this case. Deno.resolveDns is stubbed at the
+    // global level to return a public IPv4; globalThis.fetch is the same
+    // article-HTML stub used by every other test. End-to-end: the SUT
+    // calls fetchOgImage → real safeFetch → real validateOutboundUrl →
+    // stubbed Deno.resolveDns → real fetch → og:image parsed → row
+    // updated. Closes the green-for-wrong-reason gap that hid the
+    // isPrivateAddress "unparseable address" footgun for two rounds.
+    const realSafeFetchModule = await vi.importActual<
+      typeof import("../../supabase/functions/_shared/safe-fetch.ts")
+    >("../../supabase/functions/_shared/safe-fetch.ts");
+    safeFetchToggle.realSafeFetch = realSafeFetchModule.safeFetch as unknown as (
+      url: string,
+      opts?: unknown,
+    ) => Promise<unknown>;
+    safeFetchToggle.useReal = true;
+
+    // Install a Deno.resolveDns stub for this case. The fetch stub in
+    // beforeEach already serves article HTML keyed by URL. We start from
+    // the suite-wide original Deno stub so env.get + serve keep working.
+    const denoBase = originalDeno as {
+      env: { get: (k: string) => string | undefined };
+      serve: (handler: (req: Request) => Promise<Response> | Response) => unknown;
+    };
+    (globalThis as unknown as { Deno: unknown }).Deno = {
+      env: denoBase.env,
+      serve: denoBase.serve,
+      resolveDns: async (_host: string, recordType: string) => {
+        if (recordType === "A") return ["93.184.215.14"];
+        throw new Error("NotFound");
+      },
+    };
+
+    const handler = await importHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeArticles["art-real-safefetch"] = {
+      id: "art-real-safefetch",
+      url: "https://news.example.com/realstory",
+      image_url: null,
+    } as { url: string; image_url?: string | null };
+    htmlResponses["https://news.example.com/realstory"] =
+      "<html><head>" +
+      '<meta property="og:image" content="https://cdn.example.com/real-cover.jpg" />' +
+      "</head></html>";
+    pgmqState.pending = [
+      { msg_id: 42, read_ct: 1, message: { article_id: "art-real-safefetch" } },
+    ];
+
+    await handler(
+      authedRequest("http://localhost/image-consumer", { method: "POST" }),
+    );
+
+    expect(articleUpdates).toContainEqual({
+      id: "art-real-safefetch",
+      image_url: "https://cdn.example.com/real-cover.jpg",
+    });
+    expect(pgmqState.archived).toContain(42);
+  });
+
   it("refuses to fetch og:image targets that resolve to 169.254.169.254 [SSRF — T3 P1-5]", async () => {
     const handler = await importHandler();
     expect(handler).toBeDefined();
     if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
-    fakeArticles["art-ssrf"] = { url: "https://attacker.example.com/page", image_url: null };
+    fakeArticles["art-ssrf"] = {
+      id: "art-ssrf",
+      url: "https://attacker.example.com/page",
+      image_url: null,
+    } as { url: string; image_url?: string | null };
     htmlResponses["https://attacker.example.com/page"] =
       '<html><head>' +
       // The mandatory hostile fixture: AWS / GCP instance-metadata host.
@@ -289,7 +526,11 @@ describe("image-consumer Edge Function", () => {
     ];
     hostile.forEach((u, i) => {
       const articleId = `art-priv-${i}`;
-      fakeArticles[articleId] = { url: `https://news.example.com/s${i}`, image_url: null };
+      fakeArticles[articleId] = {
+        id: articleId,
+        url: `https://news.example.com/s${i}`,
+        image_url: null,
+      } as { url: string; image_url?: string | null };
       htmlResponses[`https://news.example.com/s${i}`] =
         `<html><head><meta property="og:image" content="${u}" /></head></html>`;
       pgmqState.pending.push({

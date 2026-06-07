@@ -137,12 +137,42 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
   }),
 }));
 
-// Stub the seed-sources loader / fan-out helper — happy path returns one
-// source so the loop body actually runs against the mocked fetcher.
-vi.mock("../../supabase/functions/_shared/rss/fetcher.ts", async () => {
-  const real = await tryImport("../../supabase/functions/_shared/rss/fetcher.ts");
-  return real ?? { fetchAllFeeds: async () => [], fetchOneFeed: async () => null };
-});
+// Stub the fetcher module. The real module exports `fetchFeed(source, opts)`
+// and returns a `FetchResult` ({ source, items, status, ... }); the mock
+// mirrors that named export and shape exactly — any drift (e.g. exporting
+// `fetchAllFeeds`/`fetchOneFeed` instead) leaves the SUT's named import as
+// `undefined` and silently masks regressions.
+//
+// Per-test fixtures live in `fetcherItems` keyed by `source.rss_url`. Each
+// test seeds the items it wants the handler to see, the mock returns them,
+// and the post-handler tripwire asserts `upserted.length === fixtureItems.length`
+// so a silent fetcher/normalizer drop is impossible to miss.
+type MockFeedItem = {
+  title: string;
+  link: string;
+  pubDate?: string;
+  contentSnippet?: string;
+  content?: string;
+  contentHash?: string;
+};
+
+const fetcherItems: Record<string, MockFeedItem[]> = {};
+
+vi.mock("../../supabase/functions/_shared/rss/fetcher.ts", () => ({
+  fetchFeed: vi.fn(
+    async (
+      source: { id: string; rss_url: string },
+      _opts?: unknown,
+    ): Promise<{
+      source: unknown;
+      items: MockFeedItem[];
+      status: number;
+    }> => {
+      const items = fetcherItems[source.rss_url] ?? [];
+      return { source, items, status: 200 };
+    },
+  ),
+}));
 
 async function tryImport(path: string): Promise<unknown> {
   try {
@@ -193,6 +223,7 @@ beforeEach(() => {
   upserted.length = 0;
   fakeSources.length = 0;
   for (const k of Object.keys(fetchResponses)) delete fetchResponses[k];
+  for (const k of Object.keys(fetcherItems)) delete fetcherItems[k];
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
   installFetchStub();
@@ -292,6 +323,10 @@ describe("ingest Edge Function", () => {
       active: true,
     });
 
+    // Still install the raw-bytes fetch stub for completeness — useful if a
+    // future revision swaps the fetcher mock back to the real implementation
+    // — but the assertion below is on what `fetchFeed` (mocked) hands the
+    // normalizer, which is the already-decoded title.
     fetchResponses["https://example.com/cp1254.rss"] = {
       status: 200,
       // Content-Type header is the primary signal the charset helper sniffs.
@@ -299,14 +334,24 @@ describe("ingest Edge Function", () => {
       body: CP1254_BYTES,
     };
 
+    // Seed the mocked fetcher with one item carrying the expected Turkish
+    // title — the helper-level test above already proves the byte-level
+    // decode; here we just verify the normalizer + upsert sink preserve
+    // multi-byte characters without re-encoding damage.
+    const fixtureItems: MockFeedItem[] = [
+      {
+        title: EXPECTED_TITLE,
+        link: "https://example.com/a1",
+        pubDate: "Mon, 01 Jan 2024 00:00:00 GMT",
+      },
+    ];
+    fetcherItems["https://example.com/cp1254.rss"] = fixtureItems;
+
     await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
 
-    // With a seeded source the fetcher must reach the URL and the
-    // normalizer must produce at least one upsert row carrying the
-    // correctly-decoded title. The old defensive early-return on
-    // `upserted.length === 0` masked exactly the regression this test
-    // exists to catch — assert loud instead.
-    expect(upserted.length).toBeGreaterThan(0);
+    // Tripwire: row count must match the fixture exactly — any silent drop
+    // in the fetcher → normalizer → upsert chain fails here.
+    expect(upserted.length).toBe(fixtureItems.length);
     const titles = upserted.map((r) => String(r.title ?? ""));
     expect(titles.some((t) => t.includes(EXPECTED_TITLE))).toBe(true);
     for (const t of titles) {
@@ -339,10 +384,19 @@ describe("ingest Edge Function", () => {
         "</item></channel></rss>",
     };
 
+    const fixtureItems: MockFeedItem[] = [
+      {
+        title: "Sample headline",
+        link: "https://example.com/simple/1",
+        pubDate: "Mon, 01 Jan 2024 00:00:00 GMT",
+      },
+    ];
+    fetcherItems["https://example.com/simple.rss"] = fixtureItems;
+
     await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
-    // The defensive silent skip is gone: if the ingest path produced no
-    // rows for a seeded, healthy fixture, that IS the regression.
-    expect(upserted.length).toBeGreaterThan(0);
+    // Tripwire: row count must match the fixture exactly — silent drops
+    // in fetcher → normalizer → upsert fail here, not later in soft asserts.
+    expect(upserted.length).toBe(fixtureItems.length);
 
     let checked = 0;
     for (const row of upserted) {
@@ -381,7 +435,19 @@ describe("ingest Edge Function", () => {
         "</item></channel></rss>",
     };
 
+    const fixtureItems: MockFeedItem[] = [
+      {
+        title: "Dup",
+        link: "https://example.com/dup/1",
+        pubDate: "Mon, 01 Jan 2024 00:00:00 GMT",
+      },
+    ];
+    fetcherItems["https://example.com/dup.rss"] = fixtureItems;
+
     await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+    // Tripwire: first-run row count matches fixture; the re-run check below
+    // then guards the ON CONFLICT DO NOTHING semantic.
+    expect(upserted.length).toBe(fixtureItems.length);
     const firstRun = upserted.length;
     await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
     // Both runs hit upsert; the DB-side UNIQUE constraint is what makes
