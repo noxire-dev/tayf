@@ -24,6 +24,10 @@ import {
   readBatch,
 } from "../_shared/pgmq.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
+import { initSentry, withSentry } from "../_shared/sentry.ts";
+
+// Initialise Sentry at module load. No-op if SENTRY_DSN is unset.
+await initSentry("cluster-consumer");
 import { createServiceClient, type SupabaseClient } from "../_shared/supabase.ts";
 import {
   fingerprint,
@@ -1004,7 +1008,7 @@ async function drainQueue(): Promise<InvocationSummary> {
 // Deno.serve entrypoint
 // ---------------------------------------------------------------------------
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withSentry("cluster-consumer", async (req: Request) => {
   // Defence-in-depth: require an explicit service-role bearer before any
   // method-routing or body-parsing logic runs. Returns a deterministic
   // JSON-shaped 401 so a misdeploy with `--no-verify-jwt` does not silently
@@ -1044,4 +1048,4 @@ Deno.serve(async (req: Request) => {
       },
     );
   }
-});
+}));

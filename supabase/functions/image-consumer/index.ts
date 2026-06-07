@@ -35,6 +35,9 @@ import {
   isValidImageUrl,
 } from "../_shared/og-image.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
+import { initSentry, withSentry } from "../_shared/sentry.ts";
+
+await initSentry("image-consumer");
 
 // ---------------------------------------------------------------------------
 // Config
@@ -368,7 +371,7 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
 // Deno.serve entrypoint
 // ---------------------------------------------------------------------------
 
-Deno.serve(async (req) => {
+Deno.serve(withSentry("image-consumer", async (req: Request) => {
   // Bearer gate before any branch — the GET probe also returns infra detail
   // ("configured", init errors) we do not want to leak anonymously.
   const denied = requireServiceRoleBearer(req);
@@ -413,4 +416,4 @@ Deno.serve(async (req) => {
       { status: 500, headers: { "content-type": "application/json" } },
     );
   }
-});
+}));

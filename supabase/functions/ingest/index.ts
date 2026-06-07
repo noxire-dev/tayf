@@ -26,7 +26,10 @@ import type { RssSource } from "../_shared/rss/fetcher.ts";
 import type { NormalizedArticle } from "../_shared/rss/normalize.ts";
 import { normalizeArticles } from "../_shared/rss/normalize.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
+import { initSentry, withSentry } from "../_shared/sentry.ts";
 import { createServiceClient } from "../_shared/supabase.ts";
+
+await initSentry("ingest");
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -214,7 +217,7 @@ async function runCycle(): Promise<CycleStats> {
 // HTTP entrypoint
 // ---------------------------------------------------------------------------
 
-Deno.serve(async (req) => {
+Deno.serve(withSentry("ingest", async (req: Request) => {
   // Only the Vercel cron endpoint (or `supabase functions invoke`) should
   // reach this — Supabase Edge Functions sit behind a service-role bearer
   // gate by default, so an explicit allowlist here is a defence-in-depth
@@ -252,4 +255,4 @@ Deno.serve(async (req) => {
       },
     );
   }
-});
+}));
