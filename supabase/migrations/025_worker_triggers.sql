@@ -18,6 +18,49 @@
 begin;
 
 -- ---------------------------------------------------------------------------
+-- 0. EXECUTE grants for the SECURITY DEFINER trigger owners.
+--
+-- The enqueue_cluster_work() and enqueue_image_backfill() functions defined
+-- below are SECURITY DEFINER. When they call pgmq.send(...) they do so under
+-- the function-owner identity, NOT under the role that issued the INSERT
+-- on `articles`. Migration 024 grants pgmq.send EXECUTE only to
+-- service_role, so the trigger would fail with "permission denied for
+-- function pgmq.send" whenever the owner is anyone other than service_role
+-- (which is the common case: Supabase migrations run as `postgres`, so
+-- functions created here are typically owned by `postgres` /
+-- `supabase_admin`).
+--
+-- Grant EXECUTE on every pgmq.send overload to both `postgres` and
+-- `supabase_admin` so that whichever role owns the SECURITY DEFINER
+-- functions below can actually invoke pgmq.send. The DO block is defensive:
+-- if a role does not exist on a given environment (e.g. a vanilla local
+-- Postgres without the Supabase role bundle), the grant is silently
+-- skipped rather than failing the migration.
+do $$
+declare
+  fn_oid oid;
+  target_role text;
+begin
+  foreach target_role in array array['postgres', 'supabase_admin'] loop
+    if exists (select 1 from pg_roles where rolname = target_role) then
+      for fn_oid in
+        select p.oid
+        from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'pgmq' and p.proname = 'send'
+      loop
+        execute format(
+          'grant execute on function %s to %I',
+          fn_oid::regprocedure,
+          target_role
+        );
+      end loop;
+    end if;
+  end loop;
+end
+$$;
+
+-- ---------------------------------------------------------------------------
 -- 1. cluster_work enqueue
 --
 -- Fires after INSERT on `articles`. Only politics-category rows are
