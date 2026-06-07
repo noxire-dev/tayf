@@ -18,7 +18,7 @@
 // Sports-source tagging, the keyword classifier, the entity decoder, and
 // the image extractor are ported verbatim — they are dialect, not algorithm.
 
-import { strictFingerprint } from "../cluster/fingerprint.ts";
+import { sha1, strictFingerprint } from "../cluster/fingerprint.ts";
 import type { RawFeedItem, RssSource } from "./fetcher.ts";
 
 export type NewsCategory =
@@ -297,11 +297,14 @@ export function normalizeItem(
   const publishedAt = parseDate(item.isoDate ?? item.pubDate);
 
   // Strict sha1-of-shingles content hash. Fallbacks mirror the worker's
-  // chain so `content_hash` is never null — the column is NOT NULL.
+  // chain so `content_hash` is never null — the column is NOT NULL. The
+  // final fallback hashes the canonical absolute URL bytes with SHA-1 so
+  // the output is always a 40-char lowercase hex digest, matching the
+  // `articles.content_hash` CHECK constraint introduced in migration 026.
   const contentHash =
     strictFingerprint(title, description) ??
     strictFingerprint(title || absoluteUrl, "") ??
-    absoluteUrl;
+    sha1(absoluteUrl);
 
   const category: NewsCategory = SPORTS_SOURCE_SLUGS.has(source.slug)
     ? "spor"

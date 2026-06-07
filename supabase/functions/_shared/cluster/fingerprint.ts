@@ -132,7 +132,14 @@ export function strictFingerprint(
   return sha1(sorted);
 }
 
-function sha1(s: string): string {
+/**
+ * SHA-1 hex digest of the input string. Exported so other modules (e.g.
+ * `_shared/rss/normalize.ts`) can derive a 40-char fingerprint from arbitrary
+ * bytes (such as a URL) and satisfy the `articles.content_hash` CHECK
+ * constraint when the shingle-based fingerprint is unavailable. Implementation
+ * is byte-equivalent to the hashing used by `strictFingerprint`.
+ */
+export function sha1(s: string): string {
   return createHash("sha1").update(s).digest("hex");
 }
 
