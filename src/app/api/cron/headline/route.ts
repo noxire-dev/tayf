@@ -4,10 +4,22 @@ import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import {
   apiError,
+  apiServerError,
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+
+// Boot-time guard. The route is FAIL-CLOSED on a missing `CRON_SECRET` (503
+// on every invocation), but in production that failure is otherwise only
+// visible per-request. Surface it once at module-load so a mis-configured
+// deploy is obvious in the build/boot logs rather than silently 503-ing the
+// scheduled cron every 5 minutes. Idempotent: runs once per module init.
+if (process.env.NODE_ENV === "production" && !process.env.CRON_SECRET) {
+  console.warn(
+    "[headline-cron] CRON_SECRET is not set; route will fail-closed with 503 on every invocation",
+  );
+}
 
 /**
  * Vercel cron — neutral-headline rewriter.
@@ -34,10 +46,6 @@ import { clientKey, createRateLimiter } from "@/lib/rate-limit";
  * this endpoint with `Authorization: Bearer <CRON_SECRET>` automatically;
  * any external caller must supply the same header.
  */
-
-// Node runtime — the LLM call uses `fetch` plus the Supabase JS client,
-// which is happiest on Node 24.x rather than Edge.
-export const runtime = "nodejs";
 
 // Vercel Pro Hobby/Pro tier ceiling for cron routes. Per-cycle work is
 // LLM-bound (one network round-trip per cluster, sequential) so 60s leaves
@@ -97,8 +105,11 @@ interface ClusterCandidate {
   article_count: number;
 }
 
+// PostgREST returns embedded selects as arrays when the FK is many-to-one;
+// the legacy worker treated it as a single object. Accept both shapes here.
+type ClusterArticleNested = { title: string | null; published_at: string | null };
 interface ClusterArticleRow {
-  articles: { title: string | null; published_at: string | null } | null;
+  articles: ClusterArticleNested | ClusterArticleNested[] | null;
 }
 
 /**
@@ -220,9 +231,7 @@ export const GET = withApiErrors(async (request: Request) => {
     .limit(LLM_BATCH);
 
   if (pickError) {
-    return apiError(500, "Failed to pick clusters", {
-      details: { supabase: pickError.message },
-    });
+    return apiServerError(pickError);
   }
 
   const clusters = (clustersData ?? []) as ClusterCandidate[];
@@ -255,14 +264,18 @@ export const GET = withApiErrors(async (request: Request) => {
       .limit(MEMBER_TITLES_CAP);
 
     if (memberErr) {
-      perCluster[c.id] = { status: "errored", error: memberErr.message };
+      // Keep raw Supabase error out of the response body — it can embed
+      // table/column names. Log the detail for triage and hand a generic
+      // tag back to the caller. Same pattern as `apiServerError`.
+      console.error("[headline-cron] member-fetch", c.id, memberErr);
+      perCluster[c.id] = { status: "errored", error: "member-fetch-failed" };
       errored++;
       continue;
     }
 
     const items: Array<{ title: string; published_at: string | null }> = [];
-    for (const r of (memberRows ?? []) as ClusterArticleRow[]) {
-      const a = r.articles;
+    for (const r of (memberRows ?? []) as unknown as ClusterArticleRow[]) {
+      const a = Array.isArray(r.articles) ? r.articles[0] : r.articles;
       if (!a || !a.title) continue;
       items.push({ title: a.title, published_at: a.published_at });
     }
@@ -305,7 +318,8 @@ export const GET = withApiErrors(async (request: Request) => {
       .eq("id", c.id);
 
     if (writeErr) {
-      perCluster[c.id] = { status: "errored", error: writeErr.message };
+      console.error("[headline-cron] write", c.id, writeErr);
+      perCluster[c.id] = { status: "errored", error: "write-failed" };
       errored++;
       continue;
     }
