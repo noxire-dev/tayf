@@ -216,36 +216,37 @@ Renders Turkish blurbs like: `⚡ Sözcü (muhalefet) bu iktidara yakın habere 
 
 ---
 
-### `fetchAllFeeds(sources)`
+### `fetchFeed(source, opts)`
 
 ```typescript
-// src/lib/rss/fetcher.ts
-async function fetchAllFeeds(sources: Source[]): Promise<FetchResult[]>
+// supabase/functions/_shared/rss/fetcher.ts (Deno)
+async function fetchFeed(source: Source, opts?: FetchOpts): Promise<FetchResult>
 ```
 
-Fetches all RSS feeds in parallel. Each result contains `{ source, items: RawFeedItem[], error? }`.
+Fetches a single RSS feed with charset-aware decoding (iso-8859-9 / windows-1254 / UTF-8 via XML declaration sniff) and per-source header overrides. Lives in the `ingest` Edge Function. The cycle drives parallel calls itself via a bounded worker pool.
 
 ---
 
-### `normalizeArticles(source, items)`
+### `normalizeItem(source, item)`
 
 ```typescript
-// src/lib/rss/normalize.ts
-function normalizeArticles(source: Source, items: RawFeedItem[]): NormalizedArticle[]
+// supabase/functions/_shared/rss/normalize.ts (Deno)
+function normalizeItem(source: Source, item: RawFeedItem): NormalizedArticle | null
 ```
 
-Normalizes raw RSS items: URL canonicalization, HTML entity decoding, image extraction, SHA256 content hashing, keyword-based category classification.
+Normalizes one raw RSS item: URL canonicalization, HTML entity decoding, og:image extraction, sha1-of-shingles `content_hash` (40-char hex; sha256 was retired in migration 016 and locked out by migration 026's CHECK constraint), keyword-based category classification. Returns `null` if the item cannot be hashed even with the URL fallback.
 
 ---
 
-### `fetchOgImage(url)`
+### `fetchHeroImage(url)` / `fetchOgImage(url)`
 
 ```typescript
-// src/lib/rss/og-image.ts
-async function fetchOgImage(url: string): Promise<string | null>
+// supabase/functions/_shared/og-image.ts (Deno)
+async function fetchHeroImage(articleUrl: string): Promise<string | null>
+async function fetchOgImage(articleUrl: string): Promise<string | null>
 ```
 
-Fetches a page's `og:image` meta tag. Reads only the first 50KB (up to `</head>`). 8s timeout.
+Resolve the cover image for an article URL. Used by the `image-consumer` Edge Function. Reads only the first 50KB up to `</head>` and routes every outbound fetch through `_shared/safe-fetch.ts`, which DNS-resolves the host and rejects RFC1918, loopback, link-local, ULA, CGNAT, and IPv6 documentation prefixes (audit T3 SSRF allowlist).
 
 ---
 

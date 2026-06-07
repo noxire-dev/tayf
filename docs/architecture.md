@@ -146,9 +146,9 @@ erDiagram
 | `bias/config.ts` | Single source of truth for bias labels, colors, spectrum order, and the 10→3 zone mapping. |
 | `bias/cross-spectrum.ts` | Detects "surprise" outlets covering a story dominated by the opposing zone. Guards: ≥5 sources, ≥0.65 threshold, ≥3 absolute margin. |
 | `bias/analyzer.ts` | Bias distribution calculator and blindspot detector. |
-| `rss/fetcher.ts` | Parallel RSS feed fetcher with per-source header overrides and 15s timeout. |
-| `rss/normalize.ts` | Article normalization: URL canonicalization, content hashing (SHA256), HTML entity decoding, keyword-based category classification, sports source force-tagging. |
-| `rss/og-image.ts` | Fetches `og:image` from article pages (reads only first 50KB up to `</head>`). |
+| `supabase/functions/_shared/rss/fetcher.ts` | Deno-side single-feed fetcher with charset-aware decoding, per-source header overrides and 15s timeout. Called from the `ingest` Edge Function via a bounded worker pool. |
+| `supabase/functions/_shared/rss/normalize.ts` | Deno-side article normalization: URL canonicalization, HTML entity decoding, og:image extraction, sha1-of-shingles `content_hash` (migration 026 CHECK constraint enforces 40-char hex), keyword-based category classification, sports source force-tagging. |
+| `supabase/functions/_shared/og-image.ts` | Fetches `og:image` from article pages via `_shared/safe-fetch.ts` (reads only first 50KB up to `</head>`). |
 | `sources/factuality.ts` | Hand-tagged factuality + ownership metadata for ~30 outlets. |
 | `rate-limit.ts` | In-memory token-bucket rate limiter with periodic idle-bucket cleanup. |
 
@@ -195,15 +195,15 @@ Cache tags (`cacheTag`) enable targeted invalidation: `clusters`, `clusters-poli
 - **Rate limiting** on mutating endpoints (admin POST, newsletter, cron ingest/backfill)
 - **CRON_SECRET** bearer token for cron endpoints
 - **robots.txt** disallows `/admin` and `/api/`
-- Wildcard `images.remotePatterns` — acceptable because image URLs enter only through the RSS normalizer, never from user input
+- Wildcard `images.remotePatterns` — acceptable because image URLs enter only through the Deno-side `_shared/rss/normalize.ts` + `_shared/og-image.ts` pipeline, both gated by the `_shared/safe-fetch.ts` SSRF allowlist (DNS-resolves the host and rejects RFC1918, loopback, link-local, ULA, CGNAT, IPv6 documentation prefixes); never from user input
 
 ## External Dependencies
 
 | Dependency | Purpose |
 |---|---|
-| Supabase | PostgreSQL database + PostgREST API |
+| Supabase | PostgreSQL database + PostgREST API + pgmq queues + Edge Functions (Deno) |
 | `rss-parser` | RSS/Atom feed parsing |
-| `crypto-js` | SHA256 content hashing for article dedup |
+| `@sentry/nextjs` | Error tracking on the Next.js side; client + server + edge runtimes |
 | `@base-ui/react` | Headless UI primitives (Dialog, Select, Button, etc.) |
 | `class-variance-authority` | Component variant management |
 | `tailwind-merge` + `clsx` | Class name composition |
