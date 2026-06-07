@@ -3,6 +3,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import {
   apiBadRequest,
   apiError,
+  apiServerError,
   withApiErrors,
 } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
@@ -60,7 +61,7 @@ export const POST = withApiErrors(async (request: Request) => {
     if (error.code === "23505") {
       return NextResponse.json({ success: true, alreadySubscribed: true });
     }
-    return apiError(500, error.message);
+    return apiServerError(error);
   }
 
   return NextResponse.json({ success: true });

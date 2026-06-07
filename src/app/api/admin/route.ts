@@ -3,6 +3,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import {
   apiBadRequest,
   apiError,
+  apiServerError,
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
@@ -93,7 +94,7 @@ export const POST = withApiErrors(async (request: Request) => {
         .from("sources")
         .update({ active })
         .eq("slug", slug);
-      if (error) return apiError(500, error.message);
+      if (error) return apiServerError(error);
       return NextResponse.json({ success: true, message: `${slug} is now ${active ? "active" : "disabled"}` });
     }
 
@@ -110,7 +111,7 @@ export const POST = withApiErrors(async (request: Request) => {
         bias,
         active: true,
       });
-      if (error) return apiError(500, error.message);
+      if (error) return apiServerError(error);
       return NextResponse.json({ success: true, message: `${name} added` });
     }
 
@@ -125,7 +126,7 @@ export const POST = withApiErrors(async (request: Request) => {
       if (bias !== undefined) updates.bias = bias;
       if (active !== undefined) updates.active = active;
       const { error } = await supabase.from("sources").update(updates).eq("id", id);
-      if (error) return apiError(500, error.message);
+      if (error) return apiServerError(error);
       return NextResponse.json({ success: true, message: `${name || "Source"} updated` });
     }
 
@@ -133,7 +134,7 @@ export const POST = withApiErrors(async (request: Request) => {
       const { id } = body;
       if (!id) return apiBadRequest("Source id is required");
       const { error } = await supabase.from("sources").delete().eq("id", id);
-      if (error) return apiError(500, error.message);
+      if (error) return apiServerError(error);
       return NextResponse.json({ success: true, message: "Source deleted" });
     }
 
