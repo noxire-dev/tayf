@@ -32,6 +32,28 @@ function setTableResponse(table: string, response: TableResponse) {
   tableResponses[table] = { ...DEFAULT_RESPONSE, ...response };
 }
 
+// Spy on `crypto.timingSafeEqual` via a partial node:crypto mock. The
+// route imports the named export at module top-level; we need to wrap it
+// here so the constant-time test can assert the comparator was actually
+// invoked (rather than the route silently early-exiting on length / `===`).
+//
+// The closure holds the real implementation captured at mock-factory time
+// so we never recurse into the spied symbol.
+const timingSafeEqualSpy = vi.fn<
+  [NodeJS.ArrayBufferView, NodeJS.ArrayBufferView],
+  boolean
+>();
+
+vi.mock("node:crypto", async () => {
+  const actual = await vi.importActual<typeof import("node:crypto")>("node:crypto");
+  timingSafeEqualSpy.mockImplementation((a, b) => actual.timingSafeEqual(a, b));
+  return {
+    ...actual,
+    default: actual,
+    timingSafeEqual: timingSafeEqualSpy,
+  };
+});
+
 vi.mock("@supabase/supabase-js", () => ({
   createClient: () => ({
     from: (table: string) => {
@@ -69,41 +91,38 @@ vi.mock("@supabase/supabase-js", () => ({
   }),
 }));
 
-// LLM client mock. The route owns the import path; B6 may use either an
-// OpenAI-style chat completion or a Gemini SDK. We mock the broadest set
-// of plausible specifiers; the unused mocks are harmless.
-vi.mock("openai", () => ({
-  default: class FakeOpenAI {
-    chat = {
-      completions: {
-        create: vi.fn(async () => ({
-          choices: [{ message: { content: "Tarafsız başlık" } }],
-        })),
-      },
-    };
-  },
-  OpenAI: class FakeOpenAI {
-    chat = {
-      completions: {
-        create: vi.fn(async () => ({
-          choices: [{ message: { content: "Tarafsız başlık" } }],
-        })),
-      },
-    };
-  },
-}));
+// LLM client interception. The headline route talks to Anthropic's
+// `/v1/messages` endpoint over plain `fetch` (no vendored SDK), so we
+// intercept at the network boundary rather than via `vi.mock("openai", …)`
+// — that older mock targeted a dependency the route no longer imports and
+// silently allowed the real fetch through.
+const LLM_API_URL = "https://api.anthropic.com/v1/messages";
+const originalFetch = globalThis.fetch;
+let llmFetchSpy: ReturnType<typeof vi.spyOn> | null = null;
 
-vi.mock("@google/generative-ai", () => ({
-  GoogleGenerativeAI: class {
-    getGenerativeModel() {
-      return {
-        generateContent: vi.fn(async () => ({
-          response: { text: () => "Tarafsız başlık" },
-        })),
-      };
-    }
-  },
-}));
+function installLlmFetchSpy(): void {
+  llmFetchSpy = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      if (url.startsWith(LLM_API_URL)) {
+        return new Response(
+          JSON.stringify({
+            content: [{ type: "text", text: "Tarafsız başlık" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      // Anything else is unexpected for this route — fail loud rather
+      // than punch through to the real network.
+      throw new Error(`unexpected fetch to ${url}`);
+    });
+}
 
 // next/server connection() shim — same rationale as admin.test.ts.
 vi.mock("next/server", async (importOriginal) => {
@@ -119,18 +138,27 @@ const ORIGINAL_ENV = { ...process.env };
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  // The route reads ANTHROPIC_API_KEY directly; without it the LLM call
+  // path returns null and the test never observes the fetch spy.
+  process.env.ANTHROPIC_API_KEY = "sk-ant-test";
   delete process.env.CRON_SECRET;
   for (const k of Object.keys(tableResponses)) delete tableResponses[k];
   updateCalls.length = 0;
+  timingSafeEqualSpy.mockClear();
+  installLlmFetchSpy();
 });
 
 afterEach(() => {
+  if (llmFetchSpy) {
+    llmFetchSpy.mockRestore();
+    llmFetchSpy = null;
+  }
+  globalThis.fetch = originalFetch;
   for (const k of [
     "NEXT_PUBLIC_SUPABASE_URL",
     "SUPABASE_SERVICE_ROLE_KEY",
     "CRON_SECRET",
-    "OPENAI_API_KEY",
-    "GOOGLE_API_KEY",
+    "ANTHROPIC_API_KEY",
   ]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
@@ -142,11 +170,9 @@ async function tryImportRoute(): Promise<
   | { GET?: (req: Request) => Promise<Response>; POST?: (req: Request) => Promise<Response> }
   | null
 > {
-  try {
-    return await import("@/app/api/cron/headline/route");
-  } catch {
-    return null;
-  }
+  // No try/catch — a broken route import must surface as a test failure
+  // rather than masquerade as a silent skip.
+  return await import("@/app/api/cron/headline/route");
 }
 
 describe("GET /api/cron/headline", () => {
@@ -154,9 +180,10 @@ describe("GET /api/cron/headline", () => {
     delete process.env.CRON_SECRET;
 
     const mod = await tryImportRoute();
-    if (!mod) return; // B6 not yet shipped.
-    const handler = mod.GET ?? mod.POST;
-    if (!handler) return;
+    expect(mod).toBeDefined();
+    const handler = mod?.GET ?? mod?.POST;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     const res = await handler(
       new Request("http://example.com/api/cron/headline", {
@@ -172,9 +199,10 @@ describe("GET /api/cron/headline", () => {
     process.env.CRON_SECRET = "shhh";
 
     const mod = await tryImportRoute();
-    if (!mod) return;
-    const handler = mod.GET ?? mod.POST;
-    if (!handler) return;
+    expect(mod).toBeDefined();
+    const handler = mod?.GET ?? mod?.POST;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     const noAuth = await handler(
       new Request("http://example.com/api/cron/headline"),
@@ -194,9 +222,10 @@ describe("GET /api/cron/headline", () => {
     setTableResponse("clusters", { data: [], error: null });
 
     const mod = await tryImportRoute();
-    if (!mod) return;
-    const handler = mod.GET ?? mod.POST;
-    if (!handler) return;
+    expect(mod).toBeDefined();
+    const handler = mod?.GET ?? mod?.POST;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     const res = await handler(
       new Request("http://example.com/api/cron/headline", {
@@ -208,8 +237,7 @@ describe("GET /api/cron/headline", () => {
 
   it("calls the LLM and writes title_tr_neutral when clusters lack one", async () => {
     process.env.CRON_SECRET = "shhh";
-    process.env.OPENAI_API_KEY = "sk-test";
-    process.env.GOOGLE_API_KEY = "test";
+    // ANTHROPIC_API_KEY is set in beforeEach.
     setTableResponse("clusters", {
       data: [
         {
@@ -225,9 +253,10 @@ describe("GET /api/cron/headline", () => {
     });
 
     const mod = await tryImportRoute();
-    if (!mod) return;
-    const handler = mod.GET ?? mod.POST;
-    if (!handler) return;
+    expect(mod).toBeDefined();
+    const handler = mod?.GET ?? mod?.POST;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     const res = await handler(
       new Request("http://example.com/api/cron/headline", {
@@ -251,9 +280,10 @@ describe("GET /api/cron/headline", () => {
     process.env.CRON_SECRET = "abcdefghijklmnop";
 
     const mod = await tryImportRoute();
-    if (!mod) return;
-    const handler = mod.GET ?? mod.POST;
-    if (!handler) return;
+    expect(mod).toBeDefined();
+    const handler = mod?.GET ?? mod?.POST;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     // Two wrong tokens of the same length but differing in different
     // positions. If the comparator is constant-time, both should take
@@ -270,5 +300,9 @@ describe("GET /api/cron/headline", () => {
     );
     expect(wrong1.status).toBe(401);
     expect(wrong2.status).toBe(401);
+    // Tripwire: the route must actually invoke the constant-time
+    // comparator. If the code regresses to a plain `===`, the spy never
+    // fires and this assertion catches it.
+    expect(timingSafeEqualSpy).toHaveBeenCalled();
   });
 });

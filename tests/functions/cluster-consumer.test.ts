@@ -54,22 +54,25 @@ function resetPgmqState() {
   pgmqState.deleted = [];
 }
 
-// Mock the shared pgmq wrapper. B3 controls this path; B10 contracts to it.
+// Mock the shared pgmq wrapper. The exported names here MUST match the
+// real module's named exports (`readBatch`, `archive`, `deleteMessage`,
+// `send`) — otherwise vitest hoists a vi.mock with stale identifiers and
+// the SUT silently sees `undefined` for its imported helpers.
 vi.mock("../../supabase/functions/_shared/pgmq.ts", () => ({
-  pgmqRead: vi.fn(async (_queue: string, _vt: number, qty: number) => {
+  readBatch: vi.fn(async (_queue: string, _vt: number, qty: number) => {
     const batch = pgmqState.pending.slice(0, qty);
     pgmqState.pending = pgmqState.pending.slice(qty);
     return batch;
   }),
-  pgmqArchive: vi.fn(async (_queue: string, msgId: number) => {
+  archive: vi.fn(async (_queue: string, msgId: number) => {
     pgmqState.archived.push(msgId);
     return true;
   }),
-  pgmqDelete: vi.fn(async (_queue: string, msgId: number) => {
+  deleteMessage: vi.fn(async (_queue: string, msgId: number) => {
     pgmqState.deleted.push(msgId);
     return true;
   }),
-  pgmqSend: vi.fn(async () => 1),
+  send: vi.fn(async () => 1),
 }));
 
 // Mock the Supabase factory the consumer uses to read articles + upsert
@@ -104,13 +107,19 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
   }),
 }));
 
-// Stub the ensemble — the consumer just needs a clusterId back.
+// Stub the ensemble — the consumer just needs a scoring result back. The
+// real module exports `score`; we mirror that name so the SUT's named
+// import resolves to this stub.
 vi.mock("../../supabase/functions/_shared/cluster/ensemble.ts", () => ({
-  ensembleAssign: vi.fn(async (_article: unknown) => ({
-    clusterId: "00000000-0000-4000-8000-000000000001",
+  score: vi.fn((_a: unknown, _b: unknown) => ({
     score: 0.82,
-    candidates: 3,
+    components: { cosine: 0.8, entityJaccard: 0.7, fingerprintMatch: true },
+    isMatch: true,
   })),
+  isMatch: (s: number | { score: number } | null | undefined): boolean => {
+    if (s == null) return false;
+    return typeof s === "number" ? s >= 0.5 : s.score >= 0.5;
+  },
 }));
 
 beforeEach(() => {
@@ -132,21 +141,20 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 async function importHandler(): Promise<((req: Request) => Promise<Response>) | null> {
-  try {
-    await import("../../supabase/functions/cluster-consumer/index.ts");
-    const reg = (globalThis as unknown as {
-      __registeredHandler?: (req: Request) => Promise<Response>;
-    }).__registeredHandler;
-    return reg ?? null;
-  } catch {
-    return null;
-  }
+  // No try/catch: if the SUT fails to import, the test must surface that
+  // error directly rather than masquerade as a silent skip.
+  await import("../../supabase/functions/cluster-consumer/index.ts");
+  const reg = (globalThis as unknown as {
+    __registeredHandler?: (req: Request) => Promise<Response>;
+  }).__registeredHandler;
+  return reg ?? null;
 }
 
 describe("cluster-consumer Edge Function", () => {
   it("dequeues messages from the cluster_work queue (up to batch size)", async () => {
     const handler = await importHandler();
-    if (!handler) return; // B3 not yet shipped — see file header.
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     pgmqState.pending = Array.from({ length: 75 }, (_, i) => ({
       msg_id: i + 1,
@@ -172,7 +180,8 @@ describe("cluster-consumer Edge Function", () => {
 
   it("archives messages that processed successfully", async () => {
     const handler = await importHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     pgmqState.pending = [
       { msg_id: 10, read_ct: 1, message: { article_id: "art-10" } },
@@ -195,7 +204,8 @@ describe("cluster-consumer Edge Function", () => {
 
   it("permanently deletes messages with read_ct > 3 (poison handling)", async () => {
     const handler = await importHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     pgmqState.pending = [
       { msg_id: 99, read_ct: 5, message: { article_id: "ghost" } },
@@ -208,7 +218,8 @@ describe("cluster-consumer Edge Function", () => {
 
   it("returns within the per-invocation 30 s cap (smoke)", async () => {
     const handler = await importHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     // Empty queue → handler should return promptly.
     const start = Date.now();
@@ -218,7 +229,8 @@ describe("cluster-consumer Edge Function", () => {
 
   it("is idempotent — re-processing the same article produces the same upsert", async () => {
     const handler = await importHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     pgmqState.pending = [
       { msg_id: 1, read_ct: 1, message: { article_id: "art-idem" } },
@@ -249,7 +261,8 @@ describe("cluster-consumer Edge Function", () => {
 
   it("returns 200 with an empty queue (no work is not an error)", async () => {
     const handler = await importHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     pgmqState.pending = [];
     const res = await handler(
@@ -260,8 +273,7 @@ describe("cluster-consumer Edge Function", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Contract reminder: if this whole file no-ops (no handler available), the
-// QA agent reviewing B10 should flag B3 as missing — not B10 as broken. The
-// `if (!handler) return` early-out is deliberate so this suite can land
-// ahead of B3 without blocking the test runner.
+// Contract reminder: every test asserts `expect(handler).toBeDefined()` so
+// a missing or mis-imported SUT fails loud rather than silently passing as
+// a no-op. The suite no longer skips when the handler cannot be loaded.
 // ---------------------------------------------------------------------------

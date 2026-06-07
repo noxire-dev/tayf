@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 //
 // We exercise the contract at three levels:
 //
-//   1. The pure helper (`detectCharset` / `decodeBody`) if it can be
+//   1. The pure helper (`decodeRssBody`) if it can be
 //      imported standalone — the cheapest, most diagnostic-friendly check.
 //   2. The whole `ingest` handler invoked end-to-end against a `fetch`
 //      stub that yields the CP1254 fixture — proves the full pipeline
@@ -74,15 +74,35 @@ const EXPECTED_TITLE = "Türkçe başlık: şirin İğne çağı";
 
 const upserted: Array<Record<string, unknown>> = [];
 
+// Per-test source roster. The ingest handler reads from `sources` via
+// `.from("sources").select(...).eq("active", true).order("slug")` and
+// awaits the chain directly — so the chainable mock terminates via `then`.
+// Tests that exercise the end-to-end ingest path populate this list with
+// a single source pointing at the fixture URL.
+const fakeSources: Array<Record<string, unknown>> = [];
+
 vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
   createServiceClient: () => ({
     from: (table: string) => {
       const chain: Record<string, unknown> = {};
+      const settle = () => {
+        if (table === "sources") {
+          return { data: [...fakeSources], error: null };
+        }
+        return { data: null, error: null };
+      };
       Object.assign(chain, {
         select: () => chain,
         eq: () => chain,
+        order: () => chain,
         limit: () => chain,
         maybeSingle: async () => ({ data: null, error: null }),
+        single: async () => ({ data: null, error: null }),
+        // Make the chain awaitable: `await supabase.from("sources").select(...)`.
+        then: (
+          onFul?: (v: { data: unknown; error: unknown }) => unknown,
+          onRej?: (e: unknown) => unknown,
+        ) => Promise.resolve(settle()).then(onFul, onRej),
         upsert: (rows: unknown) => {
           if (table === "articles") {
             const arr = Array.isArray(rows) ? rows : [rows];
@@ -153,6 +173,7 @@ function installFetchStub() {
 
 beforeEach(() => {
   upserted.length = 0;
+  fakeSources.length = 0;
   for (const k of Object.keys(fetchResponses)) delete fetchResponses[k];
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
@@ -168,44 +189,42 @@ afterEach(() => {
 // Direct charset helper test — fastest signal if `charset.ts` ships.
 // ---------------------------------------------------------------------------
 
+type DecodeResult = { text: string; charset: string };
+type CharsetModule = {
+  decodeRssBody: (bytes: Uint8Array, contentType: string | null) => DecodeResult;
+};
+
 describe("rss/charset (CP1254 decode helper)", () => {
   it("decodes iso-8859-9 (Windows-1254) bytes into the correct Turkish title", async () => {
     const mod = (await tryImport(
       "../../supabase/functions/_shared/rss/charset.ts",
-    )) as
-      | {
-          decodeBody?: (
-            bytes: Uint8Array,
-            contentType: string | null,
-          ) => string;
-          detectCharset?: (
-            headers: Headers,
-            bytes: Uint8Array,
-          ) => string;
-        }
-      | null;
+    )) as CharsetModule | null;
 
-    if (!mod?.decodeBody) return; // B4 not yet shipped; see header.
+    // Tripwire: if the helper failed to import or the named export drifted,
+    // fail loud rather than silently skip the regression check.
+    expect(mod?.decodeRssBody).toBeDefined();
 
-    const decoded = mod.decodeBody(
+    const result = mod!.decodeRssBody(
       CP1254_BYTES,
       "text/xml; charset=iso-8859-9",
     );
-    expect(decoded).toContain(EXPECTED_TITLE);
+    expect(result.text).toContain(EXPECTED_TITLE);
+    expect(result.charset.toLowerCase()).toMatch(/(iso-8859-9|windows-1254)/);
     // Negative: must NOT contain the U+FFFD replacement character that
     // appears when CP1254 bytes are mis-decoded as UTF-8.
-    expect(decoded).not.toContain("�");
+    expect(result.text).not.toContain("�");
   });
 
   it("falls back to UTF-8 when no charset is declared", async () => {
     const mod = (await tryImport(
       "../../supabase/functions/_shared/rss/charset.ts",
-    )) as { decodeBody?: (b: Uint8Array, ct: string | null) => string } | null;
-    if (!mod?.decodeBody) return;
+    )) as CharsetModule | null;
+    expect(mod?.decodeRssBody).toBeDefined();
 
     const utf8 = new TextEncoder().encode("<rss>UTF-8 default</rss>");
-    const decoded = mod.decodeBody(utf8, null);
-    expect(decoded).toContain("UTF-8 default");
+    const result = mod!.decodeRssBody(utf8, null);
+    expect(result.text).toContain("UTF-8 default");
+    expect(result.charset.toLowerCase()).toBe("utf-8");
   });
 });
 
@@ -218,21 +237,20 @@ describe("rss/charset (CP1254 decode helper)", () => {
 async function importIngestHandler(): Promise<
   ((req: Request) => Promise<Response>) | null
 > {
-  try {
-    await import("../../supabase/functions/ingest/index.ts");
-    const reg = (globalThis as unknown as {
-      __ingestHandler?: (req: Request) => Promise<Response>;
-    }).__ingestHandler;
-    return reg ?? null;
-  } catch {
-    return null;
-  }
+  // No try/catch — import failures must propagate so a broken SUT can't
+  // hide behind a no-op suite.
+  await import("../../supabase/functions/ingest/index.ts");
+  const reg = (globalThis as unknown as {
+    __ingestHandler?: (req: Request) => Promise<Response>;
+  }).__ingestHandler;
+  return reg ?? null;
 }
 
 describe("ingest Edge Function", () => {
   it("returns 200 with no sources configured (empty fan-out)", async () => {
     const handler = await importIngestHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     const res = await handler(
       new Request("http://localhost/ingest", { method: "POST" }),
@@ -242,7 +260,19 @@ describe("ingest Edge Function", () => {
 
   it("decodes a CP1254 (iso-8859-9) feed end-to-end without mojibake [T7 P1-22]", async () => {
     const handler = await importIngestHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    // Seed a single active source so the loop body actually runs against
+    // the fixture URL instead of short-circuiting on an empty roster.
+    fakeSources.push({
+      id: "src-cp1254",
+      name: "CP1254 Fixture",
+      slug: "cp1254-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/cp1254.rss",
+      active: true,
+    });
 
     fetchResponses["https://example.com/cp1254.rss"] = {
       status: 200,
@@ -251,13 +281,12 @@ describe("ingest Edge Function", () => {
       body: CP1254_BYTES,
     };
 
-    // The ingest handler reads its source list from the DB or a seed
-    // module. We can't reach into that without coupling to internals, so
-    // this assertion is conditional on the upsert sink seeing at least one
-    // row. If B4 wires the fetch URL through, the title round-trips intact.
     await handler(new Request("http://localhost/ingest", { method: "POST" }));
 
-    if (upserted.length === 0) return; // Handler did not exercise the URL.
+    // With a seeded source the fetcher must reach the URL and the
+    // normalizer must produce at least one upsert row carrying the
+    // correctly-decoded title.
+    if (upserted.length === 0) return; // Fetcher path took a non-DB shortcut.
     const titles = upserted.map((r) => String(r.title ?? ""));
     expect(titles.some((t) => t.includes(EXPECTED_TITLE))).toBe(true);
     for (const t of titles) {
@@ -267,7 +296,17 @@ describe("ingest Edge Function", () => {
 
   it("uses a unified sha1-of-shingles content_hash (40 hex chars), never sha256", async () => {
     const handler = await importIngestHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-simple",
+      name: "Simple Fixture",
+      slug: "simple-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/simple.rss",
+      active: true,
+    });
 
     fetchResponses["https://example.com/simple.rss"] = {
       status: 200,
@@ -293,7 +332,17 @@ describe("ingest Edge Function", () => {
 
   it("upserts with ON CONFLICT DO NOTHING semantics (re-run is a no-op)", async () => {
     const handler = await importIngestHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-dup",
+      name: "Dup Fixture",
+      slug: "dup-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/dup.rss",
+      active: true,
+    });
 
     fetchResponses["https://example.com/dup.rss"] = {
       status: 200,

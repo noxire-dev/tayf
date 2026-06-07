@@ -42,21 +42,23 @@ function resetPgmqState() {
   pgmqState.deleted = [];
 }
 
+// Names mirror the real `_shared/pgmq.ts` exports (`readBatch`, `archive`,
+// `deleteMessage`, `send`); any drift means the SUT silently sees undefined.
 vi.mock("../../supabase/functions/_shared/pgmq.ts", () => ({
-  pgmqRead: vi.fn(async (_queue: string, _vt: number, qty: number) => {
+  readBatch: vi.fn(async (_queue: string, _vt: number, qty: number) => {
     const batch = pgmqState.pending.slice(0, qty);
     pgmqState.pending = pgmqState.pending.slice(qty);
     return batch;
   }),
-  pgmqArchive: vi.fn(async (_queue: string, msgId: number) => {
+  archive: vi.fn(async (_queue: string, msgId: number) => {
     pgmqState.archived.push(msgId);
     return true;
   }),
-  pgmqDelete: vi.fn(async (_queue: string, msgId: number) => {
+  deleteMessage: vi.fn(async (_queue: string, msgId: number) => {
     pgmqState.deleted.push(msgId);
     return true;
   }),
-  pgmqSend: vi.fn(async () => 1),
+  send: vi.fn(async () => 1),
 }));
 
 // Supabase mock: articles table is keyed by id; updates record the image_url.
@@ -99,15 +101,19 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
   }),
 }));
 
-// Mock the SSRF-safe fetch. We expose two behaviours: a safe one that
-// passes through to the global fetch stub, and a blocked one that throws
-// the exact error class the consumer is contractually obligated to catch.
-class SsrfBlockedError extends Error {
-  code = "SSRF_BLOCKED";
+// Mock the SSRF-safe fetch. The error class name must match what
+// `_shared/safe-fetch.ts` actually exports — `SafeFetchError` — so the
+// SUT's `instanceof` / named-import checks resolve correctly.
+class SafeFetchError extends Error {
+  code: string;
+  constructor(message: string, code = "SSRF_BLOCKED") {
+    super(message);
+    this.code = code;
+  }
 }
 
 vi.mock("../../supabase/functions/_shared/safe-fetch.ts", () => ({
-  SsrfBlockedError,
+  SafeFetchError,
   safeFetch: vi.fn(async (url: string, init?: RequestInit) => {
     // Block any URL pointing at link-local, RFC1918, or loopback hosts.
     if (
@@ -118,23 +124,38 @@ vi.mock("../../supabase/functions/_shared/safe-fetch.ts", () => ({
       /https?:\/\/127\./.test(url) ||
       /https?:\/\/\[?::1\]?/.test(url)
     ) {
-      throw new SsrfBlockedError(`blocked: ${url}`);
+      throw new SafeFetchError(`blocked: ${url}`, "SSRF_BLOCKED");
     }
     return globalThis.fetch(url, init);
   }),
 }));
 
-// `og:image` extraction. We keep this minimal — the real B5 helper does
-// more (head-only fetch, charset sniff), but the contract for these tests
-// is just "given an HTML string, return the URL".
-vi.mock("../../supabase/functions/_shared/og-image.ts", () => ({
-  extractOgImage: (html: string) => {
+// `og:image` extraction. We keep this minimal — the real helper does more
+// (head-only fetch, charset sniff). The mocked export names mirror the
+// real module: `fetchOgImage` (async, fetches the article HTML and pulls
+// the og:image URL), `fetchHeroImage` (fallback chain), and the
+// `isValidImageUrl` guard. The SUT imports them by name.
+vi.mock("../../supabase/functions/_shared/og-image.ts", () => {
+  const ogImageFromHtml = (html: string): string | null => {
     const m =
       html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i) ||
       html.match(/<meta\s+name="twitter:image"\s+content="([^"]+)"/i);
     return m ? m[1] : null;
-  },
-}));
+  };
+  const fetchOgImage = vi.fn(async (articleUrl: string) => {
+    const res = await globalThis.fetch(articleUrl);
+    if (!res.ok) return null;
+    return ogImageFromHtml(await res.text());
+  });
+  const fetchHeroImage = vi.fn(async (articleUrl: string) => {
+    const res = await globalThis.fetch(articleUrl);
+    if (!res.ok) return null;
+    return ogImageFromHtml(await res.text());
+  });
+  const isValidImageUrl = (u: unknown): u is string =>
+    typeof u === "string" && /^https?:\/\//.test(u);
+  return { fetchOgImage, fetchHeroImage, isValidImageUrl };
+});
 
 // ---------------------------------------------------------------------------
 // Global fetch stub for the article HTML responses.
@@ -172,21 +193,20 @@ afterEach(() => {
 async function importHandler(): Promise<
   ((req: Request) => Promise<Response>) | null
 > {
-  try {
-    await import("../../supabase/functions/image-consumer/index.ts");
-    const reg = (globalThis as unknown as {
-      __imageHandler?: (req: Request) => Promise<Response>;
-    }).__imageHandler;
-    return reg ?? null;
-  } catch {
-    return null;
-  }
+  // No try/catch: a failed import must surface as a real test failure,
+  // not a silent skip.
+  await import("../../supabase/functions/image-consumer/index.ts");
+  const reg = (globalThis as unknown as {
+    __imageHandler?: (req: Request) => Promise<Response>;
+  }).__imageHandler;
+  return reg ?? null;
 }
 
 describe("image-consumer Edge Function", () => {
   it("backfills a public og:image URL onto the article row (happy path)", async () => {
     const handler = await importHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     fakeArticles["art-safe"] = { url: "https://news.example.com/story", image_url: null };
     htmlResponses["https://news.example.com/story"] =
@@ -208,7 +228,8 @@ describe("image-consumer Edge Function", () => {
 
   it("refuses to fetch og:image targets that resolve to 169.254.169.254 [SSRF — T3 P1-5]", async () => {
     const handler = await importHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     fakeArticles["art-ssrf"] = { url: "https://attacker.example.com/page", image_url: null };
     htmlResponses["https://attacker.example.com/page"] =
@@ -240,7 +261,8 @@ describe("image-consumer Edge Function", () => {
 
   it("refuses to follow redirects into RFC1918 / loopback / link-local space", async () => {
     const handler = await importHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     const hostile = [
       "http://10.0.0.5/img.jpg",
@@ -272,7 +294,8 @@ describe("image-consumer Edge Function", () => {
 
   it("permanently deletes messages with read_ct > 3 (poison)", async () => {
     const handler = await importHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     pgmqState.pending = [
       { msg_id: 200, read_ct: 4, message: { article_id: "ghost" } },
@@ -285,7 +308,8 @@ describe("image-consumer Edge Function", () => {
 
   it("returns 200 on empty queue (no work is not an error)", async () => {
     const handler = await importHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     const res = await handler(
       new Request("http://localhost/image-consumer", { method: "POST" }),
@@ -295,7 +319,8 @@ describe("image-consumer Edge Function", () => {
 
   it("caps batch processing under the 30 s wall (smoke)", async () => {
     const handler = await importHandler();
-    if (!handler) return;
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     const start = Date.now();
     await handler(new Request("http://localhost/image-consumer", { method: "POST" }));

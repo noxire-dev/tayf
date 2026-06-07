@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // importing the route.
 // ---------------------------------------------------------------------------
 
-type TableName = "sources" | "articles";
+type TableName = "sources" | "articles" | "clusters" | "worker_metrics";
 
 interface SelectResponse {
   data?: unknown;
@@ -23,10 +23,31 @@ interface SelectResponse {
 const responders: {
   sourcesSelect: () => Promise<SelectResponse>;
   articlesMaybeSingle: () => Promise<SelectResponse>;
+  clustersMaybeSingle: () => Promise<SelectResponse>;
+  workerMetricsSelect: () => Promise<SelectResponse>;
 } = {
   sourcesSelect: async () => ({ data: [{ id: "s1" }], error: null }),
   articlesMaybeSingle: async () => ({
     data: { created_at: new Date().toISOString() },
+    error: null,
+  }),
+  clustersMaybeSingle: async () => ({
+    data: { created_at: new Date().toISOString() },
+    error: null,
+  }),
+  workerMetricsSelect: async () => ({
+    data: [
+      {
+        queue_name: "cluster_work",
+        queue_length: 0,
+        oldest_msg_age_sec: null,
+      },
+      {
+        queue_name: "image_backfill",
+        queue_length: 0,
+        oldest_msg_age_sec: null,
+      },
+    ],
     error: null,
   }),
 };
@@ -49,10 +70,37 @@ vi.mock("@supabase/supabase-js", () => ({
       };
       return chain;
     }
+    // The clustering probe mirrors the articles probe one-for-one
+    // (`.select(...).order(...).limit(1).maybeSingle()`).
+    function clustersChain() {
+      const chain = {
+        select: () => chain,
+        order: () => chain,
+        limit: () => chain,
+        maybeSingle: () => responders.clustersMaybeSingle(),
+      };
+      return chain;
+    }
+    // The queues probe awaits the chain directly without a terminal
+    // method, so the chain itself must be thenable.
+    function workerMetricsChain() {
+      const chain: Record<string, unknown> = {};
+      const terminal = (
+        onFul?: (v: SelectResponse) => unknown,
+        onRej?: (e: unknown) => unknown,
+      ) => responders.workerMetricsSelect().then(onFul, onRej);
+      Object.assign(chain, {
+        select: () => chain,
+        then: terminal,
+      });
+      return chain;
+    }
     return {
       from: (table: TableName) => {
         if (table === "sources") return sourcesChain();
         if (table === "articles") return articlesChain();
+        if (table === "clusters") return clustersChain();
+        if (table === "worker_metrics") return workerMetricsChain();
         throw new Error(`Unexpected table: ${table}`);
       },
     };
@@ -72,6 +120,25 @@ beforeEach(() => {
   });
   responders.articlesMaybeSingle = async () => ({
     data: { created_at: new Date().toISOString() },
+    error: null,
+  });
+  responders.clustersMaybeSingle = async () => ({
+    data: { created_at: new Date().toISOString() },
+    error: null,
+  });
+  responders.workerMetricsSelect = async () => ({
+    data: [
+      {
+        queue_name: "cluster_work",
+        queue_length: 0,
+        oldest_msg_age_sec: null,
+      },
+      {
+        queue_name: "image_backfill",
+        queue_length: 0,
+        oldest_msg_age_sec: null,
+      },
+    ],
     error: null,
   });
 });
@@ -180,5 +247,109 @@ describe("GET /api/health", () => {
     expect(body.status).toBe("degraded");
     expect(body.checks.ingestion.ok).toBe(false);
     expect(body.checks.ingestion.error).toBe("boom");
+  });
+
+  // ---------------------------------------------------------------------------
+  // B8 worker-stream probes: clustering staleness + queue health.
+  //
+  // The route adds two new checks beyond the original DB / ingestion pair:
+  //
+  //   - clustering: newest cluster's age compared against a 15-minute
+  //     threshold. The cluster-consumer Edge Function dequeues every minute,
+  //     so a gap larger than 15 min means the consumer is stuck.
+  //   - queues:     reads the `worker_metrics` view (filtered pgmq.metrics_all)
+  //     and downgrades to "degraded" when queue depth crosses 500 OR the
+  //     oldest visible message has been waiting more than 30 min.
+  //
+  // Both probes are intentionally NON-critical: they downgrade status to
+  // "degraded" with HTTP 200, never to "unhealthy" / 503. The DB + env
+  // checks remain the only flippers of the 503 boundary.
+  // ---------------------------------------------------------------------------
+
+  it("returns 200 healthy when clustering + queues are both fresh and within thresholds", async () => {
+    // Defaults set in beforeEach already paint the happy picture; this test
+    // pins the contract by exercising the new sub-payload shape explicitly.
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.status).toBe("healthy");
+    expect(body.checks.clustering.ok).toBe(true);
+    expect(typeof body.checks.clustering.lastClusterAgeSec).toBe("number");
+    expect(body.checks.queues.ok).toBe(true);
+    expect(Array.isArray(body.checks.queues.metrics)).toBe(true);
+    const queueNames = (body.checks.queues.metrics as Array<{ queue: string }>)
+      .map((m) => m.queue);
+    expect(queueNames).toEqual(
+      expect.arrayContaining(["cluster_work", "image_backfill"]),
+    );
+  });
+
+  it("returns 200 degraded when clustering is stale beyond the 15-minute threshold", async () => {
+    // 20 minutes ago is clearly past 15-min staleness.
+    const staleIso = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    responders.clustersMaybeSingle = async () => ({
+      data: { created_at: staleIso },
+      error: null,
+    });
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.status).toBe("degraded");
+    expect(body.checks.clustering.ok).toBe(false);
+    expect(body.checks.clustering.lastClusterAgeSec).toBeGreaterThan(15 * 60);
+    // DB + ingestion remain green: this is a clustering-only degradation.
+    expect(body.checks.database.ok).toBe(true);
+    expect(body.checks.ingestion.ok).toBe(true);
+  });
+
+  it("returns 200 degraded when a queue exceeds the depth threshold", async () => {
+    responders.workerMetricsSelect = async () => ({
+      data: [
+        {
+          queue_name: "cluster_work",
+          queue_length: 750, // > 500 depth alarm
+          oldest_msg_age_sec: 30,
+        },
+        {
+          queue_name: "image_backfill",
+          queue_length: 5,
+          oldest_msg_age_sec: 10,
+        },
+      ],
+      error: null,
+    });
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.status).toBe("degraded");
+    expect(body.checks.queues.ok).toBe(false);
+    expect(body.checks.queues.error).toMatch(/cluster_work/);
+    expect(body.checks.queues.error).toMatch(/depth/i);
+    // Other checks still green: this is a queues-only degradation.
+    expect(body.checks.database.ok).toBe(true);
+    expect(body.checks.clustering.ok).toBe(true);
+  });
+
+  it("returns 200 degraded when the oldest message age exceeds the 30-minute threshold", async () => {
+    responders.workerMetricsSelect = async () => ({
+      data: [
+        {
+          queue_name: "cluster_work",
+          queue_length: 12,
+          oldest_msg_age_sec: 45 * 60, // 45 min > 30 min alarm
+        },
+        {
+          queue_name: "image_backfill",
+          queue_length: 0,
+          oldest_msg_age_sec: null,
+        },
+      ],
+      error: null,
+    });
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.status).toBe("degraded");
+    expect(body.checks.queues.ok).toBe(false);
+    expect(body.checks.queues.error).toMatch(/oldest message age/i);
+    expect(body.checks.queues.error).toMatch(/cluster_work/);
+    expect(body.checks.database.ok).toBe(true);
+    expect(body.checks.clustering.ok).toBe(true);
   });
 });
