@@ -1,10 +1,33 @@
 # Worker-stream migration guide
 
-Transitioning a deployed tayf instance from the legacy tmux long-running worker pattern (`scripts/dev.mjs` + `scripts/{rss,cluster,image,headline}-worker.mjs`) to the new Vercel-cron + Supabase-Edge-Functions + pgmq stream system.
+Transitioning a deployed tayf instance from the legacy worker pattern (the per-worker `scripts/{rss,cluster,image,headline}-worker.mjs` processes orchestrated under tmux) to the new Vercel-cron + Supabase-Edge-Functions + pgmq stream system.
 
 Architectural overview lives in [`tayf-refactor/architecture/ADR-001-worker-stream-system.md`](../tayf-refactor/architecture/ADR-001-worker-stream-system.md). Read it first if you need the *why*. This document is the *how*: an ordered checklist for a one-operator deployment.
 
 > **Scope:** production Supabase project + production Vercel project. Local dev parity instructions are at the end. The user owns the merge of `refactor/worker-stream-system` to `main`; nothing in this guide does that.
+
+> **Ordering invariant (read once, obey throughout):** the Supabase migrations in step 1 MUST land before the Vercel deploy in step 4 — even an unrelated Vercel redeploy during a partially-applied migration window will regress `/api/health` (which now reads the `worker_metrics` view shipped in migration 024). Keep a freeze on Vercel deploys until step 1 is verified.
+
+---
+
+## Secret-handling preamble (apply before any step below)
+
+The service-role key is the master database credential. Pasting it into a curl invocation drops it into your shell history (`~/.bash_history` / `~/.zsh_history`). Throughout this guide, load it once into a shell variable instead and reference it as `$SR`:
+
+```bash
+# Reads stdin without echo, leaves nothing on disk:
+read -rs SR
+# Paste the service-role key, press Enter. $SR now holds the secret for this
+# shell only. Open new terminals re-read it with the same command.
+export SR
+```
+
+Every curl example below assumes `$SR` is set. The Supabase project ref is similarly held in `$PROJECT_REF`:
+
+```bash
+read -r PROJECT_REF       # paste e.g. abcd1234efgh5678
+export PROJECT_REF
+```
 
 ---
 
@@ -12,16 +35,23 @@ Architectural overview lives in [`tayf-refactor/architecture/ADR-001-worker-stre
 
 Confirm you have:
 
-- Supabase CLI installed locally: `supabase --version` (≥ 1.150 for `functions deploy`).
+- Supabase CLI installed locally, **version `1.180.x` minimum** (older releases miss `--project-ref` on `functions deploy`; newer-than-1.220 has not been smoke-tested against this guide). Check with `supabase --version`; if you need to pin, `brew install supabase/tap/supabase@1.180` or `npm install -g supabase@1.180`.
 - `supabase login` completed against the org that owns the tayf project.
-- The Supabase project ref handy. You can read it from the dashboard URL (`https://supabase.com/dashboard/project/<PROJECT_REF>`) or from `supabase/config.toml`.
-- The service-role key for that project (Supabase Dashboard → Project Settings → API).
+- The Supabase project ref handy (held in `$PROJECT_REF` per the preamble above). You can read it from the dashboard URL (`https://supabase.com/dashboard/project/<PROJECT_REF>`) or from `supabase/config.toml`.
+- The service-role key for that project (Supabase Dashboard → Project Settings → API), loaded into `$SR` per the preamble above.
 - Vercel CLI installed: `vercel --version`.
 - The current main branch is healthy: `npm run build` passes, `npm test` passes.
-- The current `vercel.ts` cron schedules are known — you'll be replacing some of them.
 - A maintenance window. Article ingestion stops for the few minutes between turning off the legacy worker and the new cron schedule firing. Cluster + image-backfill have visibility-timeout-driven re-delivery so partial-state hand-off is safe, but the gap is real.
 
-Take a database snapshot before starting (Supabase Dashboard → Database → Backups → Create snapshot). The migrations are additive but the rehash step in 026 rewrites `content_hash` for rows already in the sha256 regime — irreversible without a restore.
+Take a database snapshot before starting (Supabase Dashboard → Database → Backups → Create snapshot). The migrations are additive but migration 026 rewrites `content_hash` for rows already under the sha256 regime — irreversible without a restore.
+
+If `supabase link` has not been run on this machine yet, link now so subsequent commands resolve the project without the `--project-ref` flag:
+
+```bash
+supabase link --project-ref "$PROJECT_REF"
+```
+
+If you cannot or do not want to link, every `supabase` command below also accepts `--project-ref "$PROJECT_REF"` explicitly.
 
 ---
 
@@ -30,17 +60,29 @@ Take a database snapshot before starting (Supabase Dashboard → Database → Ba
 These migrate the database side of the new system: pgmq install, the article-insert triggers that enqueue work, and the content-hash unification.
 
 ```bash
-# From the repo root
-supabase db push                # applies any pending migrations to the linked project
+# From the repo root.
+supabase db push
 ```
 
-If you prefer to apply one at a time (recommended for the first deployment so you can stop on red):
+`supabase db push` applies all pending migrations from `supabase/migrations/` in lexical order and records them in the `_supabase_migrations` ledger. There is no first-class CLI flag for applying one migration file at a time. If you need a one-at-a-time apply (recommended on a first production run so you can stop on red), use `psql` directly and then manually reconcile the ledger afterwards:
 
 ```bash
-supabase db push --include-roles --file supabase/migrations/024_pgmq_setup.sql
-supabase db push --include-roles --file supabase/migrations/025_worker_triggers.sql
-supabase db push --include-roles --file supabase/migrations/026_unify_content_hash_v2.sql
+# Optional one-at-a-time apply. Skips the migrations ledger — the next
+# `supabase db push` will try to re-apply unless you insert the ledger rows
+# yourself.
+psql "$DATABASE_URL" -f supabase/migrations/024_pgmq_setup.sql
+psql "$DATABASE_URL" -f supabase/migrations/025_worker_triggers.sql
+psql "$DATABASE_URL" -f supabase/migrations/026_unify_content_hash_v2.sql
+
+# Then reconcile the ledger so the CLI does not retry:
+psql "$DATABASE_URL" -c "
+  insert into supabase_migrations.schema_migrations (version) values
+    ('20240000000024'), ('20240000000025'), ('20240000000026')
+  on conflict do nothing;
+"
 ```
+
+Replace the version strings with whatever timestamps the actual migration filenames carry — the CLI uses the leading numeric prefix as the version key. If you went the `supabase db push` route, skip the `psql` block above entirely.
 
 **Verification:**
 
@@ -55,53 +97,62 @@ select tgname from pg_trigger where tgrelid = 'articles'::regclass
 select conname from pg_constraint where conrelid = 'articles'::regclass
   and conname ilike '%content_hash%';
 -- Expect at least one CHECK constraint enforcing length(content_hash) = 40
+
+-- And the worker_metrics view that /api/health depends on:
+select count(*) from worker_metrics;
+-- Expect: a small integer, not "relation does not exist".
 ```
 
-Migration 026 is idempotent (gated on `length(content_hash) = 64`); re-running it is safe and produces zero rows updated on the second pass.
+If any of these return nothing or 404, STOP. Do not proceed to step 4 — `/api/health` will 503 the new Vercel deploy.
+
+Migration 026 is idempotent (gated on the hash regime); re-running it is safe.
 
 ---
 
 ## 2. Deploy the Supabase Edge Functions
 
-Three Deno-runtime functions need to ship: `ingest`, `cluster-consumer`, `image-consumer`.
+Three Deno-runtime functions need to ship: `ingest`, `cluster-consumer`, `image-consumer`. Each handler enforces an explicit bearer check against `SUPABASE_SERVICE_ROLE_KEY` (see `supabase/functions/_shared/auth.ts`), so the deploys do NOT pass `--no-verify-jwt` — Supabase's edge gateway runs its own JWT verification on top, and pg_cron's payload (step 3) carries the service-role JWT that satisfies both layers.
 
 ```bash
-supabase functions deploy ingest          --no-verify-jwt
-supabase functions deploy cluster-consumer --no-verify-jwt
-supabase functions deploy image-consumer  --no-verify-jwt
+supabase functions deploy ingest
+supabase functions deploy cluster-consumer
+supabase functions deploy image-consumer
 ```
 
-`--no-verify-jwt` is required because pg_cron calls these with the service-role bearer (set below), not a user JWT. Verification still happens — the consumers check the `Authorization` header against `SERVICE_ROLE_KEY` manually inside the handler — but Supabase's edge gateway shouldn't reject the request before the handler runs.
+If `supabase link` was skipped in step 0, append `--project-ref "$PROJECT_REF"` to each.
 
-**Set the Edge Function environment:**
-
-```bash
-supabase secrets set --env-file supabase/functions/.env.production
-```
-
-Where `supabase/functions/.env.production` contains (DO NOT commit this file — `.gitignore` already excludes it):
+**Set the Edge Function environment.** Create `supabase/functions/.env.production` locally — this file is excluded by `.gitignore` (the pattern is `supabase/functions/.env*`; if you forked before that line landed, add it now and verify with `git check-ignore -v -- supabase/functions/.env.production`). Contents:
 
 ```dotenv
 SUPABASE_URL=https://<PROJECT_REF>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 SUPABASE_ANON_KEY=<anon-key>
-# Optional: bias the consumer toward a particular Sentry DSN if Sentry is in scope.
+# Optional: Sentry DSN (Deno-side SDK; populated when observability lands).
 SENTRY_DSN=https://...@sentry.io/...
 ```
 
-**Verification:**
+Then push to Supabase:
 
 ```bash
-# Each command should print 200 (assuming no work in the queue → empty batch).
-curl -sS -X POST -H "Authorization: Bearer <SERVICE_ROLE_KEY>" \
-  "https://<PROJECT_REF>.functions.supabase.co/cluster-consumer"
-
-curl -sS -X POST -H "Authorization: Bearer <SERVICE_ROLE_KEY>" \
-  "https://<PROJECT_REF>.functions.supabase.co/image-consumer"
-
-curl -sS -X POST -H "Authorization: Bearer <SERVICE_ROLE_KEY>" \
-  "https://<PROJECT_REF>.functions.supabase.co/ingest"
+supabase secrets set --env-file supabase/functions/.env.production
 ```
+
+If your shop's policy is "never write production secrets under the repo tree", point `--env-file` at a path outside the repo (e.g. `~/.tayf-secrets/functions.env`) — the CLI does not care where the file lives.
+
+**Verification.** Each command should return 200 with an empty-batch JSON body (assuming no work in the queue yet). The `$SR` variable from the preamble carries the secret; do not paste it inline.
+
+```bash
+curl -sS -X POST -H "Authorization: Bearer $SR" \
+  "https://$PROJECT_REF.functions.supabase.co/cluster-consumer"
+
+curl -sS -X POST -H "Authorization: Bearer $SR" \
+  "https://$PROJECT_REF.functions.supabase.co/image-consumer"
+
+curl -sS -X POST -H "Authorization: Bearer $SR" \
+  "https://$PROJECT_REF.functions.supabase.co/ingest"
+```
+
+A 401 means the bearer check rejected the request — re-check that `SUPABASE_SERVICE_ROLE_KEY` in the Edge Function secrets matches the key in `$SR`. A 403 from the gateway means the JWT layer rejected it before the handler ran — confirm the deploys did NOT pass `--no-verify-jwt`.
 
 ---
 
@@ -116,18 +167,25 @@ pg_cron + pg_net live in Supabase but are NOT installed by the portable migratio
 
 -- Stash the service-role key in a database-level setting so the cron
 -- payload can reference it without baking the literal into pg_cron's
--- jobname (which is logged in cron.job_run_details, world-readable to
--- any DB role with usage on cron). The setting itself lives in
+-- jobname (which is logged in cron.job_run_details, readable to any DB
+-- role with usage on cron). The setting itself lives in
 -- pg_db_role_setting, readable only by superuser / the bootstrap role.
-alter database postgres set app.service_role_key = '<SERVICE_ROLE_KEY>';
+alter database postgres set app.service_role_key = '<paste service-role key here>';
 
--- Drain cluster_work every minute.
+-- Drain cluster_work every minute. current_setting(..., true) returns
+-- NULL instead of raising when the setting is unset, so the cron job's
+-- HTTP request goes out with an empty bearer (handler responds 401) and
+-- the failure mode is visible in Edge Function logs rather than as a
+-- SQL exception buried in cron.job_run_details.
 SELECT cron.schedule(
   'cluster-drain',
   '* * * * *',
   $$ SELECT net.http_post(
        url := 'https://<PROJECT_REF>.functions.supabase.co/cluster-consumer',
-       headers := jsonb_build_object('Authorization', 'Bearer ' || current_setting('app.service_role_key'))
+       headers := jsonb_build_object(
+         'Authorization',
+         'Bearer ' || coalesce(current_setting('app.service_role_key', true), '')
+       )
      ) $$
 );
 
@@ -137,22 +195,43 @@ SELECT cron.schedule(
   '*/5 * * * *',
   $$ SELECT net.http_post(
        url := 'https://<PROJECT_REF>.functions.supabase.co/image-consumer',
-       headers := jsonb_build_object('Authorization', 'Bearer ' || current_setting('app.service_role_key'))
+       headers := jsonb_build_object(
+         'Authorization',
+         'Bearer ' || coalesce(current_setting('app.service_role_key', true), '')
+       )
+     ) $$
+);
+
+-- Drive the ingest Edge Function every 3 minutes. This is the canonical
+-- ingest entry point now that the legacy Vercel /api/cron/ingest route
+-- has been retired — there is no other scheduled invoker, so missing
+-- this schedule means RSS articles stop flowing.
+SELECT cron.schedule(
+  'ingest-drain',
+  '*/3 * * * *',
+  $$ SELECT net.http_post(
+       url := 'https://<PROJECT_REF>.functions.supabase.co/ingest',
+       headers := jsonb_build_object(
+         'Authorization',
+         'Bearer ' || coalesce(current_setting('app.service_role_key', true), '')
+       )
      ) $$
 );
 ```
 
+Substitute `<PROJECT_REF>` literally before running — the SQL editor does not expand shell variables.
+
 **Verification:**
 
 ```sql
--- Both rows should appear; `active = true`.
+-- All three rows should appear; `active = true`.
 select jobname, schedule, active from cron.job
-  where jobname in ('cluster-drain', 'image-drain');
+  where jobname in ('cluster-drain', 'image-drain', 'ingest-drain');
 
--- After ~2 minutes, this should show recent runs with `status = 'succeeded'`.
+-- After ~3 minutes, this should show recent runs with `status = 'succeeded'`.
 select jobname, status, return_message, start_time
   from cron.job_run_details
-  where jobname in ('cluster-drain', 'image-drain')
+  where jobname in ('cluster-drain', 'image-drain', 'ingest-drain')
   order by start_time desc limit 10;
 ```
 
@@ -161,25 +240,32 @@ If you ever need to remove a schedule (for example to re-create it with a differ
 ```sql
 SELECT cron.unschedule('cluster-drain');
 SELECT cron.unschedule('image-drain');
+SELECT cron.unschedule('ingest-drain');
 ```
 
 ---
 
 ## 4. Configure Vercel: env vars + redeploy
 
-Set the secrets and redeploy. The new cron route is `/api/cron/headline`; the new Vercel cron schedule is added by B6 in `vercel.ts`.
+> **Ordering reminder:** confirm step 1's verification block returned `worker_metrics` with no error before redeploying. `/api/health` reads that view; a missing view turns the new health endpoint into a 503 and Vercel's readiness check can roll back the deploy.
+
+Set the secrets and redeploy. The only Vercel cron after this refactor is `/api/cron/headline`; ingestion, clustering, and image backfill all run on the Supabase side now.
 
 ```bash
-# Required — without this the /api/cron/* routes return 503 (FAIL-CLOSED).
+# Required — without this the /api/cron/headline route returns 401/503
+# (FAIL-CLOSED).
 vercel env add CRON_SECRET production
 # Paste a freshly-generated 32+ char random string when prompted.
 
-# Required — the headline route uses these to call the LLM.
-vercel env add OPENAI_API_KEY production    # or GOOGLE_API_KEY depending on the SDK in use
+# Required — the headline route reads this directly. There is no OpenAI
+# or Google integration; the route calls Anthropic's API and short-
+# circuits to `{ skipped: true }` when the key is missing. Set it.
+vercel env add ANTHROPIC_API_KEY production
+
 vercel env add NEXT_PUBLIC_SUPABASE_URL production
 vercel env add SUPABASE_SERVICE_ROLE_KEY production
 
-# Optional — Sentry DSN (B8 wires this up).
+# Optional — Sentry DSN.
 vercel env add SENTRY_DSN production
 ```
 
@@ -189,23 +275,22 @@ Trigger a deploy:
 vercel --prod
 ```
 
-Vercel reads `vercel.ts` on each deploy and reconciles the cron schedule. After the deploy lands, the cron page in the Vercel Dashboard shows `/api/cron/ingest` (legacy, still firing — gets retired in step 6) and `/api/cron/headline` (new, every 5 minutes).
+After this deploy, Vercel's Cron Jobs page should list **only** `/api/cron/headline` (every 5 minutes). The legacy `/api/cron/ingest`, `/api/cron/cluster`, and `/api/cron/backfill-images` routes were removed in the worker-stream refactor commit set; if you see them in the dashboard, an older deploy is still being served — wait for the new build to propagate or roll forward manually.
 
-**Verification:**
+**Verification.** `$SR` is the Supabase service-role key from the preamble; the Vercel `CRON_SECRET` is a separate value. Hold the cron secret in `$CRON_SECRET` for the same shell-history reason:
 
 ```bash
+read -rs CRON_SECRET
+export CRON_SECRET
+
 # Should return 401 because no auth header is sent.
 curl -sS -o /dev/null -w "%{http_code}\n" \
   "https://<your-tayf-domain>/api/cron/headline"
 # Expect: 401
 
-# Should return 200.
-curl -sS -H "Authorization: Bearer <CRON_SECRET>" \
+# Should return 200 with a small JSON status payload.
+curl -sS -H "Authorization: Bearer $CRON_SECRET" \
   "https://<your-tayf-domain>/api/cron/headline"
-# Expect: 200 with a small JSON status payload.
-
-# Should NEVER return 200 with CRON_SECRET intentionally unset on the server.
-# (You can test this in a preview deployment without CRON_SECRET configured.)
 ```
 
 Within ~15 minutes of the deploy, `/api/health` should report `clustering.lag_minutes < 15`. If it doesn't, see "Troubleshooting" below.
@@ -214,13 +299,13 @@ Within ~15 minutes of the deploy, `/api/health` should report `clustering.lag_mi
 
 ## 5. Drain the legacy tmux worker
 
-Once the new stream has been live for at least one full cycle (≥ 15 minutes — enough for cluster-drain and headline cron to each tick three times) and `/api/health` is green, kill the legacy worker:
+Once the new stream has been live for at least one full cycle (≥ 15 minutes — enough for cluster-drain, image-drain, ingest-drain, and headline cron to each tick three times) and `/api/health` is green, kill the legacy worker:
 
 ```bash
 # On whichever host runs the long-running worker.
 tmux kill-session -t tayf-app
 
-# If tmux isn't running, but the worker is loose as a bare `node`:
+# If tmux isn't running, but the workers are loose as bare `node`:
 pkill -f 'scripts/.*-worker.mjs'
 ```
 
@@ -230,31 +315,23 @@ Verify no `node scripts/*-worker.mjs` processes remain:
 pgrep -af 'scripts/.*-worker.mjs' || echo "all clean"
 ```
 
-The new system now owns ingestion. The legacy worker can stay un-run forever; the source files themselves are deleted in a follow-up commit on `main` after Phase 3 QA signs off.
+The new system now owns ingestion, clustering, and image backfill. The legacy per-worker scripts can stay un-run forever; the source files themselves are deleted in a follow-up commit on `main` after Phase 3 QA signs off.
 
 ---
 
-## 6. Retire the legacy Vercel cron entries
+## 6. Confirm `vercel.ts` reflects the cutover
 
-B6 added `/api/cron/headline` to `vercel.ts` but intentionally left the older entries (e.g. `/api/cron/ingest`, `/api/cron/cluster`, `/api/cron/backfill-images`) in place to avoid a sharp cut-over while the Edge Functions burn in.
+`vercel.ts` after this refactor should declare a single cron entry:
 
-After the new system has been steady for 24 hours, remove the obsolete entries from `vercel.ts` and redeploy. The exact set to remove depends on what's currently scheduled — check the array in `vercel.ts` and drop any path whose handler is now superseded by an Edge Function:
-
-| Legacy cron path | Replaced by | Action |
-|---|---|---|
-| `/api/cron/ingest` | `ingest` Edge Function via Vercel cron pulling it | KEEP (the cron pokes the edge function via Vercel still, OR retire if the orchestrator is now pg_cron) |
-| `/api/cron/cluster` | `cluster-consumer` Edge Function via pg_cron | REMOVE |
-| `/api/cron/backfill-images` | `image-consumer` Edge Function via pg_cron | REMOVE |
-| `/api/cron/headline` | itself (still Vercel) | KEEP |
-
-Coordinate the actual edit with the B7 deletion sweep — both touch adjacent files; the orchestrator merges the conflict.
-
-After the edit:
-
-```bash
-vercel --prod
-# Confirm in Vercel Dashboard → Cron Jobs that only the intended paths remain.
+```ts
+crons: [
+  { path: "/api/cron/headline", schedule: "*/5 * * * *" },
+]
 ```
+
+If you see legacy `/api/cron/cluster`, `/api/cron/ingest`, or `/api/cron/backfill-images` entries in `vercel.ts`, the refactor was not fully merged — open `vercel.ts` and remove them, then `vercel --prod` again. The Vercel Cron Jobs dashboard should then list only `/api/cron/headline`.
+
+(If you are following this guide on a branch where the legacy entries are intentionally retained as a soft-cutover safety net, the cutover is done when you remove them and redeploy. Coordinate with the QA owner before doing so.)
 
 ---
 
@@ -263,9 +340,9 @@ vercel --prod
 Trigger a manual ingest and watch the work flow through:
 
 ```bash
-# 1. Manually invoke ingest (or wait for the next /api/cron/ingest tick).
-curl -sS -X POST -H "Authorization: Bearer <SERVICE_ROLE_KEY>" \
-  "https://<PROJECT_REF>.functions.supabase.co/ingest"
+# 1. Manually invoke ingest (or wait for the next ingest-drain tick).
+curl -sS -X POST -H "Authorization: Bearer $SR" \
+  "https://$PROJECT_REF.functions.supabase.co/ingest"
 
 # 2. Watch cluster_work depth shrink as pg_cron drains it.
 psql "$DATABASE_URL" -c \
@@ -292,7 +369,9 @@ If any step lags, jump to the next section.
      order by start_time desc limit 5;
    ```
 
-   If `status = 'failed'`, the `return_message` shows the HTTP status from the Edge Function — usually a 401 (missing `app.service_role_key`) or a 500 (bug in the consumer). Check Edge Function logs in the Supabase Dashboard.
+   - `status = 'failed'` with `return_message` showing an HTTP 401 → bearer header was empty or wrong. Re-run `alter database postgres set app.service_role_key = '<key>';` against the **same** database the cron jobs target.
+   - `status = 'failed'` with `return_message = 'unrecognized configuration parameter "app.service_role_key"'` → you did NOT use `current_setting('app.service_role_key', true)` (the `missing_ok` argument). Re-run the `cron.schedule` block with the snippet exactly as written above.
+   - `status = 'failed'` with HTTP 500 → bug in the consumer. Check Edge Function logs in the Supabase Dashboard.
 
 2. Is `cluster_work` accumulating without being drained?
 
@@ -309,7 +388,8 @@ The most common cause is SSRF blocks consuming the visibility timeout without ma
 ```sql
 select * from pgmq.read('image_backfill', 60, 5);
 -- Inspect the messages' read_ct. Anything with read_ct > 3 is poison
--- and the consumer should be deleting it — if it's not, that's a B5 bug.
+-- and the consumer should be deleting it — if it's not, that's a bug
+-- in image-consumer.
 ```
 
 ### Edge Function cold-start spikes
@@ -318,7 +398,7 @@ The first invocation after a long idle (Supabase scales these to zero after ~15 
 
 ### Migration 026 failed mid-rehash
 
-The migration uses a single transaction. If it ran out of memory or hit a lock timeout, simply re-run it — the `WHERE length(content_hash) = 64` filter makes it pick up where it left off. If a row's `content_hash` somehow drifted to a length other than 40 or 64, the CHECK constraint at the bottom of the migration will fail; in that case, manually inspect and patch the offending rows before re-running.
+The migration uses a single transaction and is idempotent (per its header comment). Re-run it. If a row's `content_hash` somehow drifted to an unexpected length, the CHECK constraint at the bottom of the migration will fail; in that case, manually inspect and patch the offending rows before re-running.
 
 ---
 
@@ -331,32 +411,52 @@ supabase start
 supabase db reset                         # applies all migrations
 supabase functions serve                  # runs all Edge Functions locally on :54321
 
-# In another terminal, drain manually instead of pg_cron:
-watch -n 60 'curl -sS -X POST -H "Authorization: Bearer $LOCAL_SR_KEY" http://127.0.0.1:54321/functions/v1/cluster-consumer'
-watch -n 300 'curl -sS -X POST -H "Authorization: Bearer $LOCAL_SR_KEY" http://127.0.0.1:54321/functions/v1/image-consumer'
+# In another terminal, drain manually instead of pg_cron. $LOCAL_SR is the
+# local service-role key printed by `supabase status`; load it with
+# `read -rs LOCAL_SR && export LOCAL_SR` so it does not appear in history.
+watch -n 60 'curl -sS -X POST -H "Authorization: Bearer $LOCAL_SR" http://127.0.0.1:54321/functions/v1/cluster-consumer'
+watch -n 300 'curl -sS -X POST -H "Authorization: Bearer $LOCAL_SR" http://127.0.0.1:54321/functions/v1/image-consumer'
+watch -n 180 'curl -sS -X POST -H "Authorization: Bearer $LOCAL_SR" http://127.0.0.1:54321/functions/v1/ingest'
 ```
 
-Set `SUPABASE_LOCAL_URL=postgres://...` in your shell to enable the live tier of `tests/migrations/024-026.test.ts`:
+Set `SUPABASE_LOCAL_URL=postgres://...` in your shell to enable the live tier of `tests/migrations/024-026.test.ts`. The local DB URL is fixed by the Supabase CLI defaults:
 
 ```bash
-SUPABASE_LOCAL_URL="$(supabase status -o json | jq -r .DB_URL)" npm test
+export SUPABASE_LOCAL_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+npm test
+```
+
+If you prefer to derive the URL from the running stack, parse `supabase status` text output (there is no JSON mode):
+
+```bash
+export SUPABASE_LOCAL_URL="$(supabase status | awk -F': *' '/DB URL/ {print $2}')"
+npm test
 ```
 
 ---
 
 ## Roll-back
 
-If the new system misbehaves and you need to revert to tmux:
+If the new system misbehaves and you need to revert to the legacy per-worker scripts:
 
 1. Pause the pg_cron jobs (don't delete them — pausing is reversible):
 
    ```sql
-   update cron.job set active = false where jobname in ('cluster-drain', 'image-drain');
+   update cron.job set active = false where jobname in ('cluster-drain', 'image-drain', 'ingest-drain');
    ```
 
-2. Re-enable the legacy Vercel cron entries in `vercel.ts` (revert the B6 change) and redeploy.
+2. There is no longer a Vercel cron path to revert to: the worker-stream refactor removed `/api/cron/ingest`, `/api/cron/cluster`, and `/api/cron/backfill-images` from `vercel.ts` and the routes themselves are deleted from `src/app/api/cron/`. If you need them back, revert the refactor commit set in git before redeploying.
 
-3. Restart the tmux worker (`scripts/dev.mjs` is still in the tree until the post-QA deletion commit).
+3. Restart the legacy per-worker scripts. There is no orchestrator wrapper any more (`scripts/dev.mjs` was removed in the refactor); start each worker in its own tmux pane or systemd unit:
+
+   ```bash
+   tmux new-session -d -s tayf-app -n rss      'node scripts/rss-worker.mjs'
+   tmux new-window  -t tayf-app    -n cluster  'node scripts/cluster-worker.mjs'
+   tmux new-window  -t tayf-app    -n image    'node scripts/image-worker.mjs'
+   tmux new-window  -t tayf-app    -n headline 'node scripts/headline-worker.mjs'
+   ```
+
+   Each worker reads `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, and (for the headline worker) `ANTHROPIC_API_KEY` from the environment — export them in the shell that launches tmux, or write them into a sourced `.env`.
 
 4. Migration 026's CHECK constraint stays in place (it's forward-compatible — the legacy worker also writes 40-char sha1 hashes). Migrations 024 and 025 also stay; the new triggers do no harm with the queues unused.
 
@@ -369,11 +469,11 @@ A full rollback (drop the queues + remove the triggers) requires writing migrati
 Before declaring the migration complete:
 
 - [ ] `supabase functions deploy cluster-consumer` / `ingest` / `image-consumer` all returned success
-- [ ] Migrations 024, 025, 026 applied; verification SQL above returned the expected rows
-- [ ] `cron.job` shows `cluster-drain` and `image-drain` with `active = true`
+- [ ] Migrations 024, 025, 026 applied; verification SQL above returned the expected rows (including `worker_metrics`)
+- [ ] `cron.job` shows `cluster-drain`, `image-drain`, and `ingest-drain` with `active = true`
 - [ ] `cron.job_run_details` shows recent runs with `status = 'succeeded'`
-- [ ] `CRON_SECRET` env var is set on Vercel production
-- [ ] `vercel --prod` deploy landed with the new `/api/cron/headline` schedule
+- [ ] `CRON_SECRET` and `ANTHROPIC_API_KEY` env vars are set on Vercel production
+- [ ] `vercel --prod` deploy landed with the new `/api/cron/headline` schedule and no legacy cron entries
 - [ ] `/api/health` reports `clustering.lag_minutes < 15`
 - [ ] No `node scripts/*-worker.mjs` processes running anywhere
 - [ ] At least one cluster created in the last 15 minutes (`select count(*) from clusters where created_at > now() - interval '15 minutes'`)
