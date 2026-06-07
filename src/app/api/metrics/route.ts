@@ -90,30 +90,52 @@ export const GET = withApiErrors(async (request: Request) => {
 
   const supabase = createServerClient();
 
-  // Run all the counts in parallel
-  const [
-    articlesTotal,
-    articlesLast24h,
-    articlesLastHour,
-    politicsNullImage,
-    articlesWithImage,
-    clustersTotal,
-    clustersMulti,
-    clustersBlindspots,
-    sourcesTotal,
-    sourcesActive,
-  ] = await Promise.all([
-    supabase.from("articles").select("*", { count: "exact", head: true }),
-    supabase.from("articles").select("*", { count: "exact", head: true }).gte("created_at", new Date(Date.now() - 24 * 3600_000).toISOString()),
-    supabase.from("articles").select("*", { count: "exact", head: true }).gte("created_at", new Date(Date.now() - 3600_000).toISOString()),
-    supabase.from("articles").select("*", { count: "exact", head: true }).is("image_url", null).in("category", ["politika", "son_dakika"]),
-    supabase.from("articles").select("*", { count: "exact", head: true }).not("image_url", "is", null),
-    supabase.from("clusters").select("*", { count: "exact", head: true }),
-    supabase.from("clusters").select("*", { count: "exact", head: true }).gte("article_count", 2),
-    supabase.from("clusters").select("*", { count: "exact", head: true }).eq("is_blindspot", true),
-    supabase.from("sources").select("*", { count: "exact", head: true }),
-    supabase.from("sources").select("*", { count: "exact", head: true }).eq("active", true),
-  ]);
+  // Run all the counts in parallel.
+  const queries = [
+    { name: "articlesTotal", q: supabase.from("articles").select("*", { count: "exact", head: true }) },
+    { name: "articlesLast24h", q: supabase.from("articles").select("*", { count: "exact", head: true }).gte("created_at", new Date(Date.now() - 24 * 3600_000).toISOString()) },
+    { name: "articlesLastHour", q: supabase.from("articles").select("*", { count: "exact", head: true }).gte("created_at", new Date(Date.now() - 3600_000).toISOString()) },
+    { name: "politicsNullImage", q: supabase.from("articles").select("*", { count: "exact", head: true }).is("image_url", null).in("category", ["politika", "son_dakika"]) },
+    { name: "articlesWithImage", q: supabase.from("articles").select("*", { count: "exact", head: true }).not("image_url", "is", null) },
+    { name: "clustersTotal", q: supabase.from("clusters").select("*", { count: "exact", head: true }) },
+    { name: "clustersMulti", q: supabase.from("clusters").select("*", { count: "exact", head: true }).gte("article_count", 2) },
+    { name: "clustersBlindspots", q: supabase.from("clusters").select("*", { count: "exact", head: true }).eq("is_blindspot", true) },
+    { name: "sourcesTotal", q: supabase.from("sources").select("*", { count: "exact", head: true }) },
+    { name: "sourcesActive", q: supabase.from("sources").select("*", { count: "exact", head: true }).eq("active", true) },
+  ];
+  const results = await Promise.all(queries.map((entry) => entry.q));
+
+  // Surface any per-query Supabase errors instead of silently dropping them
+  // into `?? 0` — the previous shape would flatline a metric on RPC failure
+  // and the dashboard / on-call would see "zero articles" rather than a 5xx.
+  // Round-4 critic finding documented this as a regression of an audit-era
+  // anti-pattern resurfacing in a new file.
+  const failed = results
+    .map((r, i) => ({ name: queries[i]!.name, error: r.error }))
+    .filter((entry) => entry.error !== null);
+  if (failed.length > 0) {
+    console.error("[metrics] supabase query failure", failed);
+    return apiError(503, "metrics query failed", {
+      code: "METRICS_QUERY_FAILED",
+      details: { queries: failed.map((entry) => entry.name) },
+    });
+  }
+
+  // results[i] is guaranteed defined: the `queries` array is a literal of
+  // exactly 10 entries, so Promise.all returns exactly 10 results. The non-
+  // null assertions below mirror that invariant for the strict tsconfig
+  // (noUncheckedIndexedAccess); the alternative is a tuple type, which is
+  // noisier for the same guarantee.
+  const articlesTotal = results[0]!;
+  const articlesLast24h = results[1]!;
+  const articlesLastHour = results[2]!;
+  const politicsNullImage = results[3]!;
+  const articlesWithImage = results[4]!;
+  const clustersTotal = results[5]!;
+  const clustersMulti = results[6]!;
+  const clustersBlindspots = results[7]!;
+  const sourcesTotal = results[8]!;
+  const sourcesActive = results[9]!;
 
   const clustersCount = clustersTotal.count ?? 0;
   const totalArticles = articlesTotal.count ?? 0;
