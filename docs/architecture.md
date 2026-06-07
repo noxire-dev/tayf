@@ -2,15 +2,20 @@
 
 ## System Overview
 
-Tayf is a Next.js 16 application that aggregates Turkish news from 144 RSS sources, clusters related articles, and presents bias analysis. Ingestion and clustering run as an **event-driven worker stream** on Supabase: Vercel cron pokes an `ingest` Edge Function, an `AFTER INSERT` trigger pushes work onto `pgmq` queues, and `pg_cron` drains those queues into co-located `cluster-consumer` and `image-consumer` Edge Functions. The previous tmux-based long-running workers (`scripts/rss-worker.mjs`, `scripts/cluster-worker.mjs`, `scripts/image-worker.mjs`) are decommissioned.
+Tayf is a Next.js 16 application that aggregates Turkish news from 144 RSS sources, clusters related articles, and presents bias analysis. Ingestion and clustering run as an **event-driven worker stream** on Supabase: a `pg_cron` `ingest-drain` job pokes the `ingest` Edge Function, an `AFTER INSERT` trigger pushes work onto `pgmq` queues, and parallel `pg_cron` `cluster-drain` / `image-drain` jobs drain those queues into co-located `cluster-consumer` and `image-consumer` Edge Functions. The previous tmux-based long-running workers (`scripts/rss-worker.mjs`, `scripts/cluster-worker.mjs`, `scripts/image-worker.mjs`) are decommissioned. The only Vercel cron in the new pipeline is `/api/cron/headline`.
 
 For the full ADR (decision matrix, alternatives considered, audit findings addressed, migration plan), see [`../tayf-refactor/architecture/ADR-001-worker-stream-system.md`](../tayf-refactor/architecture/ADR-001-worker-stream-system.md).
 
 ```mermaid
 graph TB
     subgraph "Vercel cron"
-        INGEST_CRON[/api/cron/ingest<br/>*/3 * * * */]
         HEADLINE_CRON[/api/cron/headline<br/>*/5 * * * */]
+    end
+
+    subgraph "Supabase pg_cron"
+        PGCRON_INGEST[ingest-drain<br/>*/3 * * * *]
+        PGCRON_C[cluster-drain<br/>* * * * *]
+        PGCRON_I[image-drain<br/>*/5 * * * *]
     end
 
     subgraph "Supabase Edge Functions (Deno)"
@@ -27,15 +32,12 @@ graph TB
         WM[(worker_metrics view)]
     end
 
-    PGCRON_C[pg_cron<br/>* * * * *]
-    PGCRON_I[pg_cron<br/>*/5 * * * *]
-
-    INGEST_CRON --> INGEST
+    PGCRON_INGEST -->|net.http_post| INGEST
     INGEST -->|upsert| ART
     ART -.AFTER INSERT trigger.-> QC
     ART -.AFTER INSERT image_url IS NULL.-> QI
-    PGCRON_C --> CLUSTER
-    PGCRON_I --> IMAGE
+    PGCRON_C -->|net.http_post| CLUSTER
+    PGCRON_I -->|net.http_post| IMAGE
     CLUSTER -->|read+archive| QC
     CLUSTER -->|upsert| CL
     IMAGE -->|read+archive| QI
@@ -73,7 +75,7 @@ graph TB
 
 | Stage | Surface | Cadence | Responsibility |
 |---|---|---|---|
-| Ingest trigger | Vercel cron `/api/cron/ingest` | `*/3 * * * *` | CRON_SECRET-bearer-checked invocation of the `ingest` Edge Function |
+| Ingest trigger | pg_cron `ingest-drain` → `net.http_post` | `*/3 * * * *` | Service-role-bearer-checked invocation of the `ingest` Edge Function, scheduled inside Postgres so the cron registry (`cron.job`) is the single source of truth for the worker stream's cadence |
 | Ingest | Supabase Edge Function `ingest` | per invocation | Fans out across 144 RSS sources with a concurrency-bounded pool, charset-aware decode (CP1254 / iso-8859-9 + UTF-8), unified sha1-of-shingles `content_hash`, idempotent upsert into `articles` |
 | Enqueue | Postgres trigger `AFTER INSERT ON articles` | per row | `pgmq.send('cluster_work', ...)` for politics articles; `pgmq.send('image_backfill', ...)` when `image_url IS NULL` |
 | Cluster drain | Edge Function `cluster-consumer`, scheduled by `pg_cron` | `* * * * *` | `pgmq.read(vt=60, qty=50)` → run 3-method ensemble → upsert into `clusters` + `cluster_articles` → `pgmq.archive` on success, `pgmq.delete` on permanent failure (>3 reads) |

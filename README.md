@@ -11,22 +11,22 @@ Tayf (Turkish for "spectrum") is a real-time Turkish news media bias analyzer. I
 ## Tech stack
 
 - **Frontend:** Next.js 16 App Router (`src/app/`), React 19, Tailwind CSS 4 with OkLCh tokens, shadcn/ui + base-ui primitives, Lucide icons
-- **Backend:** Supabase (Postgres + pgmq queues + Edge Functions on Deno 2.x), Vercel cron triggers, event-driven worker stream — no long-running workers
+- **Backend:** Supabase (Postgres + pgmq queues + Edge Functions on Deno 2.x + `pg_cron` scheduler), one Vercel cron for headline rewrites, event-driven worker stream — no long-running workers
 - **Clustering:** 3-method ensemble — Turkish character-4-gram fingerprint, TF-IDF cosine over a 48h window, and entity-overlap heuristic — executed inside the `cluster-consumer` Edge Function (`supabase/functions/_shared/cluster/`)
-- **Ingestion:** Vercel cron pings the `ingest` Edge Function every 3 minutes; charset-aware RSS fan-out, ETag/If-Modified-Since caching, bounded concurrency, og:image backfill via a separate pgmq-driven consumer
+- **Ingestion:** the `pg_cron` `ingest-drain` job pokes the `ingest` Edge Function every 3 minutes; charset-aware RSS fan-out, ETag/If-Modified-Since caching, bounded concurrency, og:image backfill via a separate pgmq-driven consumer
 - **Bias model:** 10 source-level bias categories (`src/lib/bias/config.ts`) rolled up to 3 Medya DNA zones (`src/lib/bias/zones.ts`)
 
 ## Worker stream architecture
 
 Tayf no longer runs long-lived Node workers. The new pipeline is an event-driven stream built entirely from Vercel and Supabase primitives:
 
-- **Vercel cron** `/api/cron/ingest` (every 3 min) invokes the **`ingest` Edge Function**, which fans out across the 144 RSS sources, normalizes items (charset-aware), and upserts into `articles`.
+- **`pg_cron`** schedule `ingest-drain` (every 3 min) `net.http_post`s the **`ingest` Edge Function**, which fans out across the 144 RSS sources, normalizes items (charset-aware), and upserts into `articles`.
 - An **`AFTER INSERT` trigger** on `articles` enqueues each new politics article onto the **pgmq `cluster_work`** queue. New articles with `image_url IS NULL` are also enqueued onto **`image_backfill`**.
-- **pg_cron** schedules drain the queues by invoking the **`cluster-consumer`** and **`image-consumer`** Edge Functions co-located with the database. Per-message visibility timeouts give at-least-once semantics; archival happens on success, permanent failures (>3 reads) are dropped.
-- **Vercel cron** `/api/cron/headline` (every 5 min) generates neutral Turkish titles for any cluster still missing one.
+- Parallel **`pg_cron`** schedules `cluster-drain` (every minute) and `image-drain` (every 5 min) drain the queues by invoking the **`cluster-consumer`** and **`image-consumer`** Edge Functions co-located with the database. Per-message visibility timeouts give at-least-once semantics; archival happens on success, permanent failures (>3 reads) are dropped.
+- **Vercel cron** `/api/cron/headline` (every 5 min) — the only Vercel cron in the new pipeline — generates neutral Turkish titles for any cluster still missing one.
 
 ```
-   144 RSS feeds ─▶  Vercel cron /api/cron/ingest  ─▶  Edge Function: ingest
+   144 RSS feeds ─▶  pg_cron ingest-drain  ─▶  Edge Function: ingest
                                                               │
                                                               ▼
                                                    Postgres: articles
@@ -79,12 +79,12 @@ There are no long-running local workers. The full pipeline runs on Vercel cron +
 
 | Trigger | Surface | Purpose |
 |---|---|---|
-| Vercel cron (`*/3 * * * *`) | `/api/cron/ingest` → Edge Function `ingest` | RSS fan-out, charset-aware normalize, upsert articles |
-| pg_cron (`* * * * *`) | Edge Function `cluster-consumer` | Drains `cluster_work` pgmq, runs the 3-method ensemble, upserts clusters |
-| pg_cron (`*/5 * * * *`) | Edge Function `image-consumer` | Drains `image_backfill` pgmq, SSRF-safe og:image backfill |
+| pg_cron `ingest-drain` (`*/3 * * * *`) | `net.http_post` → Edge Function `ingest` | RSS fan-out, charset-aware normalize, upsert articles |
+| pg_cron `cluster-drain` (`* * * * *`) | Edge Function `cluster-consumer` | Drains `cluster_work` pgmq, runs the 3-method ensemble, upserts clusters |
+| pg_cron `image-drain` (`*/5 * * * *`) | Edge Function `image-consumer` | Drains `image_backfill` pgmq, SSRF-safe og:image backfill |
 | Vercel cron (`*/5 * * * *`) | `/api/cron/headline` | LLM-generates neutral Turkish title for new clusters |
 
-To exercise the pipeline locally: run `supabase start`, apply migrations through `026`, deploy the Edge Functions with `supabase functions serve`, and hit the cron routes directly with `curl` and a `CRON_SECRET` bearer. See [`docs/migration-guide.md`](docs/migration-guide.md) and [`tayf-refactor/architecture/ADR-001-worker-stream-system.md`](../tayf-refactor/architecture/ADR-001-worker-stream-system.md) for the full operator runbook.
+To exercise the pipeline locally: run `supabase start`, apply migrations through `026`, deploy the Edge Functions with `supabase functions serve`, install the pg_cron schedules from [`docs/migration-guide.md`](docs/migration-guide.md) §3 (or invoke the Edge Functions ad-hoc with `curl` against `http://127.0.0.1:54321/functions/v1/ingest` to bypass the scheduler), and hit `/api/cron/headline` with a `CRON_SECRET` bearer. See [`docs/migration-guide.md`](docs/migration-guide.md) and [`tayf-refactor/architecture/ADR-001-worker-stream-system.md`](../tayf-refactor/architecture/ADR-001-worker-stream-system.md) for the full operator runbook.
 
 ## Routes
 

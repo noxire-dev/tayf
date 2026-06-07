@@ -77,35 +77,47 @@ Admin actions. Rate limited: 20-token bucket, 0.2 tokens/sec refill.
 
 ---
 
-### `GET /api/cron/ingest`
+### `GET /api/cron/headline`
 
-Manual/cron RSS ingestion. Skips if the tmux worker inserted articles in the last 30s.
+LLM-generates neutral Turkish headlines (`title_tr_neutral`) for clusters that still lack one. This is the **only** Vercel cron in the worker-stream architecture: ingestion, cluster fan-out, and og:image backfill all run on `pg_cron` schedules (`ingest-drain`, `cluster-drain`, `image-drain`) that `net.http_post` directly into the Supabase Edge Functions. The legacy `/api/cron/ingest` and `/api/cron/backfill-images` routes have been removed.
 
-**Headers**: `Authorization: Bearer <CRON_SECRET>` (if `CRON_SECRET` is set)
+**Headers**: `Authorization: Bearer <CRON_SECRET>` (required — the route is FAIL-CLOSED on a missing or empty `CRON_SECRET` in the runtime environment and returns 503 on every invocation in that case).
 
-**Rate limit**: 5-token bucket, 1 token/60s refill.
+Bearer comparison uses `crypto.timingSafeEqual`. Vercel cron supplies this header automatically when scheduled via `vercel.json` / `vercel.ts`.
 
-**Response** `200`:
+**Rate limit**: 5-token bucket, 1 token / 60 seconds refill. The cron itself ticks every 5 minutes so this exists mainly to absorb ad-hoc `curl` floods with a valid secret. Per-cycle wall budget: `maxDuration = 60s`.
+
+**Response** `200` — success envelope (work was done):
 ```json
 {
   "success": true,
-  "totalInserted": 42,
-  "totalOgFetched": 5,
-  "totalErrors": 1,
-  "sources": { "sabah": { "inserted": 3, "ogImages": 1 }, "diken": { "inserted": 0, "error": "timeout" } },
-  "timestamp": "..."
+  "rewrote": 3,
+  "skipped": 1,
+  "errored": 0,
+  "perCluster": {
+    "<cluster_id>": { "status": "rewrote" },
+    "<cluster_id>": { "status": "skipped" },
+    "<cluster_id>": { "status": "errored", "error": "rewriteClusterHeadline failed" }
+  },
+  "timestamp": "2026-06-07T12:00:00.000Z"
 }
 ```
 
----
+**Response** `200` — soft no-op when `ANTHROPIC_API_KEY` is unset (the cron keeps firing every 5 minutes; dropping the key into env vars heals on the next tick without a manual kick):
+```json
+{ "skipped": true, "reason": "LLM API key not set", "timestamp": "..." }
+```
 
-### `GET /api/cron/backfill-images`
+**Response** `200` — no candidates this tick:
+```json
+{ "success": true, "rewrote": 0, "skipped": 0, "errored": 0, "reason": "no candidates", "timestamp": "..." }
+```
 
-Fetches og:image for up to 30 imageless articles per call.
+**Response** `401`: missing / wrong bearer.
+**Response** `429`: rate limit exhausted; envelope includes `details.retryAfterMs`.
+**Response** `503`: `CRON_SECRET` not configured in the runtime environment (FAIL-CLOSED).
 
-**Headers**: `Authorization: Bearer <CRON_SECRET>` (if set)
-
-**Rate limit**: 5-token bucket, 1 token/60s refill.
+Per-cluster errors in the success envelope are coarse-tagged (`"rewriteClusterHeadline failed"`, `"member-fetch-failed"`) — raw `err.message` is logged server-side / to Sentry, never embedded in the response body.
 
 ---
 

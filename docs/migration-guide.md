@@ -293,7 +293,31 @@ vercel env add SUPABASE_SERVICE_ROLE_KEY production
 
 # Optional — Sentry DSN.
 vercel env add SENTRY_DSN production
+
+# Optional — LLM provider overrides for /api/cron/headline. Both fall back
+# to the hardcoded vendor defaults baked into the route, so leaving them
+# unset keeps the current behaviour. Set them only when swapping providers
+# or pinning a different model snapshot without a code change.
+vercel env add LLM_API_URL production
+vercel env add LLM_MODEL production
 ```
+
+### Headline-route LLM env vars
+
+The `/api/cron/headline` route reads two optional environment variables to
+locate the upstream LLM. The defaults are baked into the route as a
+backward-compat fallback, so existing deployments keep working with no
+config; set the vars only when you need to override.
+
+| Env var       | Default                                       | Notes                                                                 |
+| ------------- | --------------------------------------------- | --------------------------------------------------------------------- |
+| `LLM_API_URL` | `https://api.anthropic.com/v1/messages`       | POST endpoint for the messages-shaped completion call.                |
+| `LLM_MODEL`   | `claude-haiku-4-5-20251001`                   | Model identifier sent in the request body's `model` field.            |
+
+The route still calls `process.env.ANTHROPIC_API_KEY` for the bearer-style
+`x-api-key` header and short-circuits to `{ skipped: true }` when it is
+missing; swapping providers without also swapping the auth header shape
+will require a small code change in `rewriteClusterHeadline`.
 
 Trigger a deploy:
 
