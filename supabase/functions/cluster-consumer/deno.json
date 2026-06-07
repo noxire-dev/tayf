@@ -1,0 +1,14 @@
+{
+  "imports": {
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2",
+    "_shared/": "../_shared/"
+  },
+  "tasks": {
+    "serve": "deno run --allow-net --allow-env --allow-read --watch index.ts",
+    "check": "deno check index.ts"
+  },
+  "compilerOptions": {
+    "strict": true,
+    "lib": ["deno.window", "deno.ns"]
+  }
+}
