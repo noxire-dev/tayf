@@ -78,16 +78,26 @@ end
 $$;
 
 -- 3. worker_checkpoint table — observability + safety-net resume marker.
+--
+-- Schema note (Round-2 fix): articles.id is uuid (see 002_create_articles.sql),
+-- so the resume marker must store a uuid, not a bigint. We rename the column
+-- to last_seen_article_id for clarity and type it as uuid; it is nullable
+-- because a freshly-installed consumer row legitimately has no prior ack.
+-- If a timestamptz cursor is preferred later (ordering by articles.created_at
+-- is the more natural pattern for "resume from where we left off"), add a
+-- second column last_seen_created_at in a follow-up migration — both shapes
+-- are forward-compatible with the safety-net (R5) consumer described in
+-- ADR-001.
 create table if not exists public.worker_checkpoint (
-  name          text        primary key,
-  last_seen_id  bigint      not null default 0,
-  updated_at    timestamptz not null default now()
+  name                  text        primary key,
+  last_seen_article_id  uuid,
+  updated_at            timestamptz not null default now()
 );
 
 comment on table public.worker_checkpoint is
   'Resume markers for worker consumers. Each row is one logical consumer '
-  '(e.g. cluster-consumer, image-consumer); last_seen_id stores the '
-  'highest articles.id the consumer has acked. Read by the safety-net '
+  '(e.g. cluster-consumer, image-consumer); last_seen_article_id stores the '
+  'highest articles.id (uuid) the consumer has acked. Read by the safety-net '
   'Vercel cron paths (R5 in ADR-001) and exposed via /api/health for '
   'liveness checks. The happy-path Edge Function consumers do not write '
   'here — they rely on pgmq archive semantics — so a stale row here is '
@@ -95,8 +105,9 @@ comment on table public.worker_checkpoint is
 
 comment on column public.worker_checkpoint.name is
   'Logical consumer identifier (e.g. "cluster-consumer", "image-consumer").';
-comment on column public.worker_checkpoint.last_seen_id is
-  'Highest articles.id the named consumer has finished processing.';
+comment on column public.worker_checkpoint.last_seen_article_id is
+  'Highest articles.id (uuid) the named consumer has acked. Nullable: a '
+  'freshly-installed consumer has no prior ack.';
 comment on column public.worker_checkpoint.updated_at is
   'Wall-clock timestamp of the last checkpoint write. Liveness signal.';
 
