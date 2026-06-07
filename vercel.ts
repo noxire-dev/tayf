@@ -7,41 +7,27 @@ import type { VercelConfig } from "@vercel/config/v1";
  *
  * CRONS
  * -----
- * Two paths are scheduled, both following the same dual-path pattern:
- * a primary tmux worker (started via `scripts/dev.mjs`) plus a Vercel
- * cron fallback that no-ops when the tmux worker is alive.
+ * Ingestion, clustering and image backfill now run as an event-driven
+ * stream out of Supabase: a pg_cron job pokes the `ingest` Edge Function,
+ * an `AFTER INSERT ON articles` trigger fans work onto two `pgmq` queues
+ * (`cluster_work`, `image_backfill`), and `pg_cron` drains them into the
+ * co-located `cluster-consumer` and `image-consumer` Edge Functions. None
+ * of those steps live on Vercel anymore.
  *
- *   - `/api/cron/ingest` — RSS ingestion fallback for `rss-worker.mjs`.
- *     Bails if the worker inserted anything in the last 30 seconds. See
- *     `src/app/api/cron/ingest/route.ts` for the full architecture note.
+ * The single remaining Vercel cron is the neutral-headline rewriter:
  *
- *   - `/api/cron/cluster` — Clustering fallback for `cluster-worker.mjs`.
- *     Bails if any cluster was created in the last 60 seconds. See
- *     `src/app/api/cron/cluster/route.ts`.
- *
- *   - `/api/cron/headline` — Neutral-headline rewriter. Walks clusters that
- *     still lack `title_tr_neutral` and asks Claude Haiku for a tarafsız
- *     başlık. Stateless — replaces the legacy `scripts/headline-worker.mjs`
- *     tmux loop. Fail-closed against a missing `CRON_SECRET`. See
+ *   - `/api/cron/headline` — Walks clusters that still lack
+ *     `title_tr_neutral` and asks Claude Haiku for a tarafsız başlık.
+ *     Stateless and bounded (5 clusters per tick) so LLM spend stays
+ *     predictable and a transient Anthropic 5xx never blows a whole
+ *     batch. Fail-closed against a missing `CRON_SECRET`. See
  *     `src/app/api/cron/headline/route.ts`.
  *
- * Cluster runs every 3 minutes — slower than ingest because each cycle is
- * heavier (300s maxDuration on Pro) and the dual-path guard handles the
- * common case of "tmux is up". Three-minute spacing also keeps the cron's
- * own previous run well outside the 60s skip window.
- *
- * Headline runs every 5 minutes. The batch is intentionally small (5
- * clusters per tick) so the LLM spend stays bounded and a transient
- * Anthropic 5xx never blows a whole batch.
- *
- * `/api/cron/backfill-images` intentionally has no cron schedule: it is a
- * manual-only endpoint triggered from the admin panel's "Kapak Resimleri"
- * button or ad-hoc curl.
+ * Full architecture in
+ * `tayf-refactor/architecture/ADR-001-worker-stream-system.md`.
  */
 const config: VercelConfig = {
   crons: [
-    { path: "/api/cron/ingest", schedule: "0,30 * * * *" },
-    { path: "/api/cron/cluster", schedule: "*/3 * * * *" },
     { path: "/api/cron/headline", schedule: "*/5 * * * *" },
   ],
 };

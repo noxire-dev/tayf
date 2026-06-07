@@ -87,30 +87,6 @@ export const POST = withApiErrors(async (request: Request) => {
       return NextResponse.json({ success: true, message: "All clusters deleted" });
     }
 
-    case "ingest": {
-      const baseUrl = request.headers.get("origin") || "http://localhost:3000";
-      // Cron routes require Bearer CRON_SECRET in prod; forward it so the
-      // admin "Çek" button keeps working behind the same guard as Vercel Cron.
-      const headers: Record<string, string> = process.env.CRON_SECRET
-        ? { Authorization: `Bearer ${process.env.CRON_SECRET}` }
-        : {};
-      const res = await fetch(`${baseUrl}/api/cron/ingest`, { headers });
-      const data = await res.json();
-      return NextResponse.json(data);
-    }
-
-    case "backfill_images": {
-      const baseUrl = request.headers.get("origin") || "http://localhost:3000";
-      const headers: Record<string, string> = process.env.CRON_SECRET
-        ? { Authorization: `Bearer ${process.env.CRON_SECRET}` }
-        : {};
-      const res = await fetch(`${baseUrl}/api/cron/backfill-images`, {
-        headers,
-      });
-      const data = await res.json();
-      return NextResponse.json(data);
-    }
-
     case "toggle_source": {
       const { slug, active } = body;
       const { error } = await supabase
