@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { withSentryConfig } from "@sentry/nextjs";
 
 /**
  * W4-Q7 Next.js 16 config review (2026-04-06)
@@ -125,4 +126,30 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+/**
+ * `withSentryConfig` (B8 / observability) injects the @sentry/nextjs webpack
+ * plugin so client-bundle source maps are uploaded at build time and the
+ * `instrumentation.ts` server/edge bootstraps are wired into the build graph.
+ *
+ * Build-time uploads only run when `SENTRY_AUTH_TOKEN` is set, so local `next
+ * build` without a token still completes (the plugin no-ops the upload step).
+ * Compile-time options are intentionally narrow:
+ *   - `silent` quiets the plugin in CI logs when there's no token to use.
+ *   - `widenClientFileUpload: true` includes Next 16's `_next/static/chunks`
+ *     output so stack traces in the browser resolve to original sources.
+ *   - `tunnelRoute` is left undefined; we'll only enable it if an ad-blocker
+ *     starts swallowing Sentry events in the wild.
+ *   - `hideSourceMaps: true` keeps the .map files off the public CDN — they
+ *     still upload to Sentry, just not to `/_next/static/`.
+ *   - `disableLogger: true` strips Sentry's verbose client logger from
+ *     production bundles.
+ */
+export default withSentryConfig(nextConfig, {
+  org: process.env.SENTRY_ORG,
+  project: process.env.SENTRY_PROJECT,
+  authToken: process.env.SENTRY_AUTH_TOKEN,
+  silent: !process.env.CI,
+  widenClientFileUpload: true,
+  hideSourceMaps: true,
+  disableLogger: true,
+});

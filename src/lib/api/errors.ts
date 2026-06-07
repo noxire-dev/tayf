@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { unstable_rethrow } from "next/navigation";
+import { captureServerException } from "@/lib/sentry/server";
 
 /**
  * Canonical error response shape for every JSON route under `src/app/api/`.
@@ -65,7 +66,9 @@ export const apiServerError = (err: unknown, code?: string) => {
  * a route touches request.headers / cookies / dynamic APIs), etc. Those
  * errors MUST propagate up to Next's internals or the framework gets
  * confused and logs spurious 500s during build/prerender. Real errors
- * fall through to `apiServerError`.
+ * are reported to Sentry (B8 observability) and then fall through to
+ * `apiServerError`. Sentry capture runs AFTER `unstable_rethrow` so we
+ * don't pollute Sentry with framework control-flow signals.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function withApiErrors<T extends (...args: any[]) => Promise<Response>>(
@@ -76,6 +79,7 @@ export function withApiErrors<T extends (...args: any[]) => Promise<Response>>(
       return await handler(...args);
     } catch (err) {
       unstable_rethrow(err);
+      captureServerException(err);
       return apiServerError(err);
     }
   }) as T;
