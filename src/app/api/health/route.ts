@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { withApiErrors } from "@/lib/api/errors";
+import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
 /**
  * Lightweight health check endpoint (E1 / Observability + B8 worker-stream
@@ -88,6 +89,20 @@ const STALE_CLUSTERING_THRESHOLD_SEC = 15 * 60;
 const QUEUE_DEPTH_THRESHOLD = 500;
 const QUEUE_OLDEST_AGE_THRESHOLD_SEC = 30 * 60;
 
+// Anonymous callers are rate-limited so the public `{status}` envelope path
+// can't be turned into a cheap DoS amplifier against Supabase. The bearer
+// path (authenticated via CRON_SECRET) bypasses this limiter — the
+// monitoring / cron system has a legitimate need to probe at high cadence,
+// and the bearer check is already constant-time-safe + secret-gated.
+//
+// Token-bucket sizing: capacity 30 / refill 1 token per second lets a
+// single client burst up to 30 probes instantly (e.g. a status-page
+// dashboard fanning out on first paint) then settles to a steady 1/sec.
+const anonHealthLimit = createRateLimiter("health-anon", {
+  capacity: 30,
+  refillPerSecond: 1,
+});
+
 /**
  * Constant-time bearer-token check. Mirrors the helper in
  * `/api/cron/headline`. Returns true iff `header` is exactly
@@ -105,6 +120,20 @@ function isAuthorized(header: string | null, secret: string): boolean {
   const expectedBuf = Buffer.from(secret, "utf8");
   if (providedBuf.length !== expectedBuf.length) return false;
   return timingSafeEqual(providedBuf, expectedBuf);
+}
+
+/**
+ * Returns true iff the caller presented a valid `Authorization: Bearer
+ * ${CRON_SECRET}` header. Centralised here so the rate-limit gate at the
+ * top of GET and the response-shape switch in `respond` agree on the
+ * answer. A missing or empty `CRON_SECRET` env var means there is no way
+ * to authenticate, so every caller is treated as anonymous.
+ */
+function isAuthenticated(request: Request | undefined): boolean {
+  if (request === undefined) return false;
+  const secret = process.env.CRON_SECRET;
+  if (typeof secret !== "string" || secret.length === 0) return false;
+  return isAuthorized(request.headers.get("authorization"), secret);
 }
 
 /**
@@ -163,6 +192,26 @@ export const GET = withApiErrors(async (request?: Request) => {
   // hatch — it hangs forever during prerender and resolves only on a real
   // request, so the handler stays fully dynamic.
   await connection();
+
+  // Determine authentication early so we can decide whether to apply the
+  // anonymous rate-limit gate BEFORE running any probes. An over-limit
+  // anonymous caller short-circuits with 429 and never touches Supabase.
+  const authed = isAuthenticated(request);
+  if (!authed && request !== undefined) {
+    const rl = anonHealthLimit(clientKey(request));
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { status: "rate_limited", retryAfterMs: rl.retryAfterMs },
+        {
+          status: 429,
+          headers: {
+            "Cache-Control": "no-store",
+            "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)),
+          },
+        },
+      );
+    }
+  }
 
   const checks: HealthChecks = {
     database: { ok: false },
@@ -383,12 +432,7 @@ function respond(
   request?: Request
 ): Response {
   const timestamp = new Date().toISOString();
-  const secret = process.env.CRON_SECRET;
-  const authed =
-    typeof secret === "string" &&
-    secret.length > 0 &&
-    request !== undefined &&
-    isAuthorized(request.headers.get("authorization"), secret);
+  const authed = isAuthenticated(request);
 
   const headers = { "Cache-Control": "no-store" };
 
