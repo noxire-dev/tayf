@@ -97,11 +97,12 @@ create table if not exists public.worker_checkpoint (
 comment on table public.worker_checkpoint is
   'Resume markers for worker consumers. Each row is one logical consumer '
   '(e.g. cluster-consumer, image-consumer); last_seen_article_id stores the '
-  'highest articles.id (uuid) the consumer has acked. Read by the safety-net '
-  'Vercel cron paths (R5 in ADR-001) and exposed via /api/health for '
-  'liveness checks. The happy-path Edge Function consumers do not write '
-  'here — they rely on pgmq archive semantics — so a stale row here is '
-  'not a fault.';
+  'highest articles.id (uuid) the consumer has acked. Reserved for the '
+  'safety-net Vercel cron paths (R5 in ADR-001) so they can resume where a '
+  'drained Edge Function consumer left off. The happy-path Edge Function '
+  'consumers do not write here — they rely on pgmq archive semantics — so a '
+  'stale row here is not a fault. NOTE: /api/health does not currently read '
+  'this table; a future liveness wiring is tracked in the R3 follow-up.';
 
 comment on column public.worker_checkpoint.name is
   'Logical consumer identifier (e.g. "cluster-consumer", "image-consumer").';
@@ -115,6 +116,28 @@ alter table public.worker_checkpoint enable row level security;
 
 -- No policies — service_role bypasses RLS, anon/authenticated are denied.
 -- Matches the pattern from 017_rls_policies.sql.
+
+-- BEFORE UPDATE trigger: keep updated_at honest without callers having to
+-- pass it explicitly. Recreating the function with `create or replace`
+-- keeps this migration safely re-runnable; the trigger itself is dropped
+-- and recreated for the same reason.
+create or replace function public.worker_checkpoint_set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at := now();
+  return new;
+end;
+$$;
+
+drop trigger if exists worker_checkpoint_set_updated_at
+  on public.worker_checkpoint;
+
+create trigger worker_checkpoint_set_updated_at
+  before update on public.worker_checkpoint
+  for each row
+  execute function public.worker_checkpoint_set_updated_at();
 
 -- 4. Lock pgmq surface area to service_role.
 -- Revoke first (idempotent), then grant. We revoke from PUBLIC as well to
