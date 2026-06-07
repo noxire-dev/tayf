@@ -32,6 +32,24 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
   },
 };
 
+// Service-role bearer mirrored into `SUPABASE_SERVICE_ROLE_KEY` in
+// `beforeEach`. The `requireServiceRoleBearer` gate in the handler reads the
+// env var via the Deno polyfill and compares it to the inbound Authorization
+// header. Every authorised `new Request(...)` is built via `authedRequest(...)`
+// so the gate accepts the call; the dedicated 401 test below intentionally
+// bypasses this helper.
+const TEST_SERVICE_ROLE_KEY = "test-service-role-key";
+
+function authedRequest(url: string, init: RequestInit = {}): Request {
+  return new Request(url, {
+    ...init,
+    headers: {
+      ...(init.headers ?? {}),
+      Authorization: `Bearer ${TEST_SERVICE_ROLE_KEY}`,
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // CP1254 fixture
 //
@@ -176,7 +194,7 @@ beforeEach(() => {
   fakeSources.length = 0;
   for (const k of Object.keys(fetchResponses)) delete fetchResponses[k];
   process.env.SUPABASE_URL = "https://example.supabase.co";
-  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
   installFetchStub();
 });
 
@@ -253,7 +271,7 @@ describe("ingest Edge Function", () => {
     if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     const res = await handler(
-      new Request("http://localhost/ingest", { method: "POST" }),
+      authedRequest("http://localhost/ingest", { method: "POST" }),
     );
     expect([200, 207]).toContain(res.status);
   });
@@ -281,12 +299,14 @@ describe("ingest Edge Function", () => {
       body: CP1254_BYTES,
     };
 
-    await handler(new Request("http://localhost/ingest", { method: "POST" }));
+    await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
 
     // With a seeded source the fetcher must reach the URL and the
     // normalizer must produce at least one upsert row carrying the
-    // correctly-decoded title.
-    if (upserted.length === 0) return; // Fetcher path took a non-DB shortcut.
+    // correctly-decoded title. The old defensive early-return on
+    // `upserted.length === 0` masked exactly the regression this test
+    // exists to catch — assert loud instead.
+    expect(upserted.length).toBeGreaterThan(0);
     const titles = upserted.map((r) => String(r.title ?? ""));
     expect(titles.some((t) => t.includes(EXPECTED_TITLE))).toBe(true);
     for (const t of titles) {
@@ -319,15 +339,22 @@ describe("ingest Edge Function", () => {
         "</item></channel></rss>",
     };
 
-    await handler(new Request("http://localhost/ingest", { method: "POST" }));
-    if (upserted.length === 0) return;
+    await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+    // The defensive silent skip is gone: if the ingest path produced no
+    // rows for a seeded, healthy fixture, that IS the regression.
+    expect(upserted.length).toBeGreaterThan(0);
 
+    let checked = 0;
     for (const row of upserted) {
       const h = String((row as { content_hash?: string }).content_hash ?? "");
       if (!h) continue;
       // 40 hex = sha1; 64 hex = sha256. Audit T7 P1-21 says we want sha1.
       expect(h).toMatch(/^[0-9a-f]{40}$/);
+      checked += 1;
     }
+    // Tripwire: at least one upserted row must carry a content_hash so the
+    // sha1-vs-sha256 assertion above is actually exercised.
+    expect(checked).toBeGreaterThan(0);
   });
 
   it("upserts with ON CONFLICT DO NOTHING semantics (re-run is a no-op)", async () => {
@@ -354,12 +381,25 @@ describe("ingest Edge Function", () => {
         "</item></channel></rss>",
     };
 
-    await handler(new Request("http://localhost/ingest", { method: "POST" }));
+    await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
     const firstRun = upserted.length;
-    await handler(new Request("http://localhost/ingest", { method: "POST" }));
+    await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
     // Both runs hit upsert; the DB-side UNIQUE constraint is what makes
     // re-runs a no-op, not the application code. We just check the handler
     // didn't *grow* its row count beyond a reasonable bound.
     expect(upserted.length).toBeLessThanOrEqual(firstRun * 2);
+  });
+
+  it("returns 401 without a service-role bearer", async () => {
+    const handler = await importIngestHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    // No Authorization header → the gate must reject before fan-out.
+    const res = await handler(
+      new Request("http://localhost/ingest", { method: "POST" }),
+    );
+    expect(res.status).toBe(401);
+    expect(upserted).toHaveLength(0);
   });
 });

@@ -36,6 +36,23 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
   },
 };
 
+// The service-role bearer the handler's `requireServiceRoleBearer` gate
+// expects. `beforeEach` mirrors this into `SUPABASE_SERVICE_ROLE_KEY`, which
+// the Deno-env polyfill above reads via `process.env`. Every authorised
+// `new Request(...)` carries `Authorization: Bearer ${TEST_SERVICE_ROLE_KEY}`
+// through `authedRequest(...)`.
+const TEST_SERVICE_ROLE_KEY = "test-service-role-key";
+
+function authedRequest(url: string, init: RequestInit = {}): Request {
+  return new Request(url, {
+    ...init,
+    headers: {
+      ...(init.headers ?? {}),
+      Authorization: `Bearer ${TEST_SERVICE_ROLE_KEY}`,
+    },
+  });
+}
+
 interface PgmqMessage {
   msg_id: number;
   read_ct: number;
@@ -126,7 +143,7 @@ beforeEach(() => {
   resetPgmqState();
   for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
   process.env.SUPABASE_URL = "https://example.supabase.co";
-  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
 });
 
 afterEach(() => {
@@ -171,7 +188,7 @@ describe("cluster-consumer Edge Function", () => {
     };
 
     const res = await handler(
-      new Request("http://localhost/cluster-consumer", { method: "POST" }),
+      authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
     );
     expect([200, 207]).toContain(res.status);
     // At most 50 (the contracted batch size); never more than the queue had.
@@ -195,7 +212,7 @@ describe("cluster-consumer Edge Function", () => {
       created_at: new Date().toISOString(),
     };
 
-    await handler(new Request("http://localhost/cluster-consumer", { method: "POST" }));
+    await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
     // Either archived (happy path) or deleted (poison) — the contract is that
     // the message is REMOVED from the live queue, never left to re-deliver.
     const removed = [...pgmqState.archived, ...pgmqState.deleted];
@@ -212,7 +229,7 @@ describe("cluster-consumer Edge Function", () => {
     ];
     // No fakeArticles["ghost"] → article fetch returns null → permanent fail.
 
-    await handler(new Request("http://localhost/cluster-consumer", { method: "POST" }));
+    await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
     expect(pgmqState.deleted).toContain(99);
   });
 
@@ -223,7 +240,7 @@ describe("cluster-consumer Edge Function", () => {
 
     // Empty queue → handler should return promptly.
     const start = Date.now();
-    await handler(new Request("http://localhost/cluster-consumer", { method: "POST" }));
+    await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
     expect(Date.now() - start).toBeLessThan(30_000);
   });
 
@@ -244,14 +261,14 @@ describe("cluster-consumer Edge Function", () => {
       created_at: new Date().toISOString(),
     };
 
-    await handler(new Request("http://localhost/cluster-consumer", { method: "POST" }));
+    await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
     const archivedOnce = [...pgmqState.archived];
 
     // Replay with the same payload.
     pgmqState.pending = [
       { msg_id: 2, read_ct: 1, message: { article_id: "art-idem" } },
     ];
-    await handler(new Request("http://localhost/cluster-consumer", { method: "POST" }));
+    await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
 
     // Both runs must have removed their message from the queue.
     expect(pgmqState.archived.length + pgmqState.deleted.length).toBeGreaterThan(
@@ -266,9 +283,23 @@ describe("cluster-consumer Edge Function", () => {
 
     pgmqState.pending = [];
     const res = await handler(
-      new Request("http://localhost/cluster-consumer", { method: "POST" }),
+      authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
     );
     expect(res.status).toBe(200);
+  });
+
+  it("returns 401 without a service-role bearer", async () => {
+    const handler = await importHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    // Deliberately unauthenticated — no Authorization header.
+    const res = await handler(
+      new Request("http://localhost/cluster-consumer", { method: "POST" }),
+    );
+    expect(res.status).toBe(401);
+    // Queue must be untouched when auth fails.
+    expect(pgmqState.archived.length + pgmqState.deleted.length).toBe(0);
   });
 });
 

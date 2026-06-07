@@ -32,7 +32,7 @@ const responders: {
     error: null,
   }),
   clustersMaybeSingle: async () => ({
-    data: { created_at: new Date().toISOString() },
+    data: { updated_at: new Date().toISOString() },
     error: null,
   }),
   workerMetricsSelect: async () => ({
@@ -123,7 +123,7 @@ beforeEach(() => {
     error: null,
   });
   responders.clustersMaybeSingle = async () => ({
-    data: { created_at: new Date().toISOString() },
+    data: { updated_at: new Date().toISOString() },
     error: null,
   });
   responders.workerMetricsSelect = async () => ({
@@ -175,6 +175,11 @@ describe("GET /api/health", () => {
     expect(typeof body.checks.database.latencyMs).toBe("number");
     expect(body.checks.ingestion.ok).toBe(true);
     expect(typeof body.checks.ingestion.lastArticleAgeSec).toBe("number");
+    // Tripwire: the clustering probe reads `clusters.updated_at`. If the mock
+    // fixture or the route's selected column drifts back to `created_at`,
+    // `new Date(undefined)` is NaN and this flips false — catching a
+    // pass-for-wrong-reason regression instead of letting it slip through.
+    expect(body.checks.clustering.ok).toBe(true);
   });
 
   it("returns 503 unhealthy when required env vars are missing", async () => {
@@ -287,7 +292,7 @@ describe("GET /api/health", () => {
     // 20 minutes ago is clearly past 15-min staleness.
     const staleIso = new Date(Date.now() - 20 * 60 * 1000).toISOString();
     responders.clustersMaybeSingle = async () => ({
-      data: { created_at: staleIso },
+      data: { updated_at: staleIso },
       error: null,
     });
     const { status, body } = await callGet();

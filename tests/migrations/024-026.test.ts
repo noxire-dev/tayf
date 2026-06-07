@@ -66,7 +66,12 @@ describe("migration 024_pgmq_setup.sql (static)", () => {
   it("creates a worker_checkpoint table for safety-net consumer modes", () => {
     if (!sql) return;
     expect(sql).toMatch(/create\s+table[^;]*worker_checkpoint/i);
-    expect(sql).toMatch(/last_seen_id\s+bigint/i);
+    // Round-2 fix: articles.id is uuid, so the resume marker is a uuid column
+    // named last_seen_article_id (see 024_pgmq_setup.sql).
+    expect(sql).toMatch(/last_seen_article_id\s+uuid/i);
+    // Tripwire: the legacy bigint shape must never come back — a maintainer
+    // reverting to it would silently regress Round-1 F3 (uuid column rename).
+    expect(sql).not.toMatch(/last_seen_id\s+bigint/i);
   });
 
   it("exposes a worker_metrics view (read-only surface for /api/health)", () => {

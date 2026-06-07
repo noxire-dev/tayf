@@ -24,6 +24,22 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
   },
 };
 
+// Service-role bearer matching `SUPABASE_SERVICE_ROLE_KEY` set in `beforeEach`.
+// Every authorised `new Request(...)` is built via `authedRequest(...)` so the
+// `requireServiceRoleBearer` gate in the handler accepts the call. The 401
+// regression test below intentionally bypasses this helper.
+const TEST_SERVICE_ROLE_KEY = "test-service-role-key";
+
+function authedRequest(url: string, init: RequestInit = {}): Request {
+  return new Request(url, {
+    ...init,
+    headers: {
+      ...(init.headers ?? {}),
+      Authorization: `Bearer ${TEST_SERVICE_ROLE_KEY}`,
+    },
+  });
+}
+
 interface PgmqMessage {
   msg_id: number;
   read_ct: number;
@@ -170,7 +186,7 @@ beforeEach(() => {
   for (const k of Object.keys(htmlResponses)) delete htmlResponses[k];
   articleUpdates.length = 0;
   process.env.SUPABASE_URL = "https://example.supabase.co";
-  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
 
   globalThis.fetch = (async (
     input: RequestInfo | URL,
@@ -217,7 +233,7 @@ describe("image-consumer Edge Function", () => {
       { msg_id: 1, read_ct: 1, message: { article_id: "art-safe" } },
     ];
 
-    await handler(new Request("http://localhost/image-consumer", { method: "POST" }));
+    await handler(authedRequest("http://localhost/image-consumer", { method: "POST" }));
 
     expect(articleUpdates).toContainEqual({
       id: "art-safe",
@@ -241,7 +257,7 @@ describe("image-consumer Edge Function", () => {
       { msg_id: 2, read_ct: 1, message: { article_id: "art-ssrf" } },
     ];
 
-    await handler(new Request("http://localhost/image-consumer", { method: "POST" }));
+    await handler(authedRequest("http://localhost/image-consumer", { method: "POST" }));
 
     // Critical post-condition: NO update with the hostile URL.
     const sawHostile = articleUpdates.some(
@@ -283,7 +299,7 @@ describe("image-consumer Edge Function", () => {
       });
     });
 
-    await handler(new Request("http://localhost/image-consumer", { method: "POST" }));
+    await handler(authedRequest("http://localhost/image-consumer", { method: "POST" }));
 
     for (const u of articleUpdates) {
       expect(u.image_url ?? "").not.toMatch(
@@ -302,7 +318,7 @@ describe("image-consumer Edge Function", () => {
     ];
     // No fakeArticles["ghost"] → fetch will 404 / article lookup misses.
 
-    await handler(new Request("http://localhost/image-consumer", { method: "POST" }));
+    await handler(authedRequest("http://localhost/image-consumer", { method: "POST" }));
     expect(pgmqState.deleted).toContain(200);
   });
 
@@ -312,7 +328,7 @@ describe("image-consumer Edge Function", () => {
     if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     const res = await handler(
-      new Request("http://localhost/image-consumer", { method: "POST" }),
+      authedRequest("http://localhost/image-consumer", { method: "POST" }),
     );
     expect(res.status).toBe(200);
   });
@@ -323,7 +339,21 @@ describe("image-consumer Edge Function", () => {
     if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     const start = Date.now();
-    await handler(new Request("http://localhost/image-consumer", { method: "POST" }));
+    await handler(authedRequest("http://localhost/image-consumer", { method: "POST" }));
     expect(Date.now() - start).toBeLessThan(30_000);
+  });
+
+  it("returns 401 without a service-role bearer", async () => {
+    const handler = await importHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    // No Authorization header → handler must reject before touching the queue.
+    const res = await handler(
+      new Request("http://localhost/image-consumer", { method: "POST" }),
+    );
+    expect(res.status).toBe(401);
+    expect(articleUpdates).toHaveLength(0);
+    expect(pgmqState.archived.length + pgmqState.deleted.length).toBe(0);
   });
 });
