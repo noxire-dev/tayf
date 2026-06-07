@@ -1012,9 +1012,15 @@ Deno.serve(async (req: Request) => {
   const denied = requireServiceRoleBearer(req);
   if (denied) return denied;
 
-  // pg_cron will fire a POST; manual triggers (Supabase dashboard) use GET.
-  // Both should drive the same drain path.
-  if (req.method !== "POST" && req.method !== "GET") {
+  // GET is a cheap liveness probe (no DB or queue work). pg_cron and
+  // operator-driven drains use POST.
+  if (req.method === "GET") {
+    return new Response(JSON.stringify({ ok: true, ready: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  if (req.method !== "POST") {
     return new Response("method not allowed", { status: 405 });
   }
   try {
@@ -1024,14 +1030,18 @@ Deno.serve(async (req: Request) => {
       headers: { "content-type": "application/json" },
     });
   } catch (err) {
-    const message = err instanceof Error ? err.stack || err.message : String(err);
-    console.error(`[cluster-consumer] fatal: ${message}`);
+    const request_id = crypto.randomUUID();
+    // Log the full error (stack + message) to Edge Function logs only.
+    console.error(`[cluster-consumer] ${request_id}`, err);
     // Mark the cache as stale so a fresh invocation rebuilds from DB truth.
     clusterContextCache = null;
     sourceLookupCache = null;
-    return new Response(JSON.stringify({ ok: false, error: message.slice(0, 500) }), {
-      status: 500,
-      headers: { "content-type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ ok: false, error: "internal-error", request_id }),
+      {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      },
+    );
   }
 });

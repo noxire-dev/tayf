@@ -222,7 +222,15 @@ Deno.serve(async (req) => {
   const denied = requireServiceRoleBearer(req);
   if (denied) return denied;
 
-  if (req.method !== "POST" && req.method !== "GET") {
+  // GET is a cheap liveness probe (no feed fetches, no DB writes). The
+  // Vercel cron poke and operator-driven runs both come in as POST.
+  if (req.method === "GET") {
+    return new Response(JSON.stringify({ ok: true, ready: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  if (req.method !== "POST") {
     return new Response("method not allowed", { status: 405 });
   }
 
@@ -233,11 +241,15 @@ Deno.serve(async (req) => {
       headers: { "content-type": "application/json" },
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[ingest] cycle failed: ${message}`);
-    return new Response(JSON.stringify({ ok: false, error: message }), {
-      status: 500,
-      headers: { "content-type": "application/json" },
-    });
+    const request_id = crypto.randomUUID();
+    // Log the full error (stack + message) to Edge Function logs only.
+    console.error(`[ingest] ${request_id}`, err);
+    return new Response(
+      JSON.stringify({ ok: false, error: "internal-error", request_id }),
+      {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      },
+    );
   }
 });

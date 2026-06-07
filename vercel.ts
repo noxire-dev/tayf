@@ -17,9 +17,9 @@ import type { VercelConfig } from "@vercel/config/v1";
  * The single remaining Vercel cron is the neutral-headline rewriter:
  *
  *   - `/api/cron/headline` — Walks clusters that still lack
- *     `title_tr_neutral` and asks Claude Haiku for a tarafsız başlık.
+ *     `title_tr_neutral` and asks the headline LLM for a tarafsız başlık.
  *     Stateless and bounded (5 clusters per tick) so LLM spend stays
- *     predictable and a transient Anthropic 5xx never blows a whole
+ *     predictable and a transient upstream 5xx never blows a whole
  *     batch. Fail-closed against a missing `CRON_SECRET`. See
  *     `src/app/api/cron/headline/route.ts`.
  *

@@ -405,10 +405,11 @@ Deno.serve(async (req) => {
       headers: { "content-type": "application/json" },
     });
   } catch (err) {
-    const m = err instanceof Error ? err.stack ?? err.message : String(err);
-    console.error(`[image-consumer] drain fatal: ${m}`);
+    const request_id = crypto.randomUUID();
+    // Log the full error (stack + message) to Edge Function logs only.
+    console.error(`[image-consumer] ${request_id}`, err);
     return new Response(
-      JSON.stringify({ error: "drain failed", detail: m.slice(0, 200) }),
+      JSON.stringify({ ok: false, error: "internal-error", request_id }),
       { status: 500, headers: { "content-type": "application/json" } },
     );
   }
