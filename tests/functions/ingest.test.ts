@@ -126,7 +126,23 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
             const arr = Array.isArray(rows) ? rows : [rows];
             for (const r of arr) upserted.push(r as Record<string, unknown>);
           }
-          return Promise.resolve({ data: null, error: null });
+          // The SUT chains `.upsert(...).select("id")` (production code at
+          // supabase/functions/ingest/index.ts:185-188). Returning a bare
+          // Promise here makes the chain throw `select is not a function`
+          // — vitest swallows the throw inside the SUT's outer catch and
+          // the tests then green-pass on the `upserted[]` rows we pushed
+          // ABOVE the throw. Round-3 / Round-4 QA flagged this as TC-R4-F1.
+          // Return a chainable thenable so `.select("id")` works AND
+          // direct-await still resolves to the result envelope.
+          const result = { data: [{ id: "fake-row-id" }], error: null };
+          const builder = {
+            select: () => Promise.resolve(result),
+            then: (
+              onFul?: (v: typeof result) => unknown,
+              onRej?: (e: unknown) => unknown,
+            ) => Promise.resolve(result).then(onFul, onRej),
+          };
+          return builder;
         },
         insert: () => Promise.resolve({ data: null, error: null }),
         update: () => chain,
