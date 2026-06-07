@@ -37,9 +37,6 @@ import { withApiErrors } from "@/lib/api/errors";
  *     HTML error page.
  */
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
 interface QueueMetric {
   queue: string;
   queueLength: number;

@@ -31,9 +31,6 @@ import {
  * lands in Sentry rather than rendering Next's default HTML error page.
  */
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
 interface Metrics {
   timestamp: string;
   articles: {
