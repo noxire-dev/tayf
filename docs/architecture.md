@@ -2,49 +2,85 @@
 
 ## System Overview
 
-Tayf is a Next.js 16 application that aggregates Turkish news from 144 RSS sources, clusters related articles, and presents bias analysis. The system has two main data paths: a continuous RSS worker (primary) and HTTP-triggered ingestion (fallback), both writing to a shared Supabase PostgreSQL database.
+Tayf is a Next.js 16 application that aggregates Turkish news from 144 RSS sources, clusters related articles, and presents bias analysis. Ingestion and clustering run as an **event-driven worker stream** on Supabase: Vercel cron pokes an `ingest` Edge Function, an `AFTER INSERT` trigger pushes work onto `pgmq` queues, and `pg_cron` drains those queues into co-located `cluster-consumer` and `image-consumer` Edge Functions. The previous tmux-based long-running workers (`scripts/rss-worker.mjs`, `scripts/cluster-worker.mjs`, `scripts/image-worker.mjs`) are decommissioned.
+
+For the full ADR (decision matrix, alternatives considered, audit findings addressed, migration plan), see [`../tayf-refactor/architecture/ADR-001-worker-stream-system.md`](../tayf-refactor/architecture/ADR-001-worker-stream-system.md).
 
 ```mermaid
 graph TB
-    subgraph "Data Ingestion"
-        W[RSS Worker<br/>tmux/60s cycle] -->|upsert| DB[(Supabase<br/>PostgreSQL)]
-        CRON[/api/cron/ingest<br/>HTTP fallback/] -->|upsert| DB
-        BF[/api/cron/backfill-images/] -->|update image_url| DB
+    subgraph "Vercel cron"
+        INGEST_CRON[/api/cron/ingest<br/>*/3 * * * */]
+        HEADLINE_CRON[/api/cron/headline<br/>*/5 * * * */]
     end
+
+    subgraph "Supabase Edge Functions (Deno)"
+        INGEST[ingest<br/>RSS fan-out + normalize + upsert]
+        CLUSTER[cluster-consumer<br/>3-method ensemble]
+        IMAGE[image-consumer<br/>og:image backfill, SSRF-safe]
+    end
+
+    subgraph "Supabase Postgres"
+        ART[(articles)]
+        CL[(clusters / cluster_articles)]
+        QC[(pgmq: cluster_work)]
+        QI[(pgmq: image_backfill)]
+        WM[(worker_metrics view)]
+    end
+
+    PGCRON_C[pg_cron<br/>* * * * *]
+    PGCRON_I[pg_cron<br/>*/5 * * * *]
+
+    INGEST_CRON --> INGEST
+    INGEST -->|upsert| ART
+    ART -.AFTER INSERT trigger.-> QC
+    ART -.AFTER INSERT image_url IS NULL.-> QI
+    PGCRON_C --> CLUSTER
+    PGCRON_I --> IMAGE
+    CLUSTER -->|read+archive| QC
+    CLUSTER -->|upsert| CL
+    IMAGE -->|read+archive| QI
+    IMAGE -->|update image_url| ART
+    HEADLINE_CRON -->|fill title_tr_neutral| CL
 
     subgraph "Next.js 16 App"
         HOME[/ Home<br/>Ranked cluster feed]
-        BLIND[/blindspots<br/>One-sided coverage]
-        DETAIL[/cluster/id<br/>Full story detail]
-        SRC[/sources<br/>Source directory]
-        SRCPF[/source/slug<br/>Source profile]
-        TL[/timeline<br/>24h chronological]
-        TR[/trends<br/>30-day chart]
-        ADMIN[/admin<br/>Management panel]
+        BLIND[/blindspots]
+        DETAIL[/cluster/id]
+        SRC[/sources]
+        SRCPF[/source/slug]
+        TL[/timeline]
+        TR[/trends]
+        ADMIN[/admin]
     end
 
     subgraph "API Routes"
         API_ADMIN[/api/admin]
-        API_HEALTH[/api/health]
-        API_METRICS[/api/metrics]
+        API_HEALTH[/api/health<br/>reads worker_metrics]
+        API_METRICS[/api/metrics<br/>reads worker_metrics]
         API_NEWS[/api/newsletter]
     end
 
-    DB --> HOME
-    DB --> BLIND
-    DB --> DETAIL
-    DB --> SRC
-    DB --> SRCPF
-    DB --> TL
-    DB --> TR
-    DB --> ADMIN
-    DB --> API_ADMIN
-    DB --> API_HEALTH
-    DB --> API_METRICS
-
-    HOME --> DETAIL
-    SRC --> SRCPF
+    CL --> HOME
+    CL --> BLIND
+    CL --> DETAIL
+    ART --> TL
+    ART --> TR
+    WM --> API_HEALTH
+    WM --> API_METRICS
 ```
+
+## Worker stream pipeline
+
+| Stage | Surface | Cadence | Responsibility |
+|---|---|---|---|
+| Ingest trigger | Vercel cron `/api/cron/ingest` | `*/3 * * * *` | CRON_SECRET-bearer-checked invocation of the `ingest` Edge Function |
+| Ingest | Supabase Edge Function `ingest` | per invocation | Fans out across 144 RSS sources with a concurrency-bounded pool, charset-aware decode (CP1254 / iso-8859-9 + UTF-8), unified sha1-of-shingles `content_hash`, idempotent upsert into `articles` |
+| Enqueue | Postgres trigger `AFTER INSERT ON articles` | per row | `pgmq.send('cluster_work', ...)` for politics articles; `pgmq.send('image_backfill', ...)` when `image_url IS NULL` |
+| Cluster drain | Edge Function `cluster-consumer`, scheduled by `pg_cron` | `* * * * *` | `pgmq.read(vt=60, qty=50)` → run 3-method ensemble → upsert into `clusters` + `cluster_articles` → `pgmq.archive` on success, `pgmq.delete` on permanent failure (>3 reads) |
+| Image drain | Edge Function `image-consumer`, scheduled by `pg_cron` | `*/5 * * * *` | Fetch first 50 KB of article URL, extract `og:image` / `twitter:image`, SSRF guard (RFC1918/169.254/loopback/IPv6 link-local), update `articles.image_url` |
+| Headline | Vercel cron `/api/cron/headline` | `*/5 * * * *` | LLM-generated neutral Turkish title for new clusters lacking `title_tr_neutral` |
+
+The pgmq queues give at-least-once delivery with visibility timeouts; `worker_checkpoint` and the `worker_metrics` view feed `/api/health` and `/api/metrics`. Cold-start risk on the Edge Functions is mitigated by the regular pg_cron cadence keeping the instances warm.
 
 ## Data Model
 

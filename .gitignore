@@ -44,3 +44,6 @@ next-env.d.ts
 .claude/
 team/
 skills.md
+
+# supabase local
+supabase/.temp/

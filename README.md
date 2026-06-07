@@ -11,45 +11,48 @@ Tayf (Turkish for "spectrum") is a real-time Turkish news media bias analyzer. I
 ## Tech stack
 
 - **Frontend:** Next.js 16 App Router (`src/app/`), React 19, Tailwind CSS 4 with OkLCh tokens, shadcn/ui + base-ui primitives, Lucide icons
-- **Backend:** Supabase (Postgres), Node.js 20 ESM long-running workers, no serverless cron
-- **Clustering:** 3-method ensemble — Turkish character-4-gram fingerprint, TF-IDF cosine over a 48h window, and entity-overlap heuristic — combined in `scripts/lib/cluster/ensemble.mjs`
-- **Ingestion:** continuous RSS workers with per-source dead-feed circuit breakers, ETag/If-Modified-Since caching, bounded concurrency pools, and og:image fallback for articles missing media
+- **Backend:** Supabase (Postgres + pgmq queues + Edge Functions on Deno 2.x), Vercel cron triggers, event-driven worker stream — no long-running workers
+- **Clustering:** 3-method ensemble — Turkish character-4-gram fingerprint, TF-IDF cosine over a 48h window, and entity-overlap heuristic — executed inside the `cluster-consumer` Edge Function (`supabase/functions/_shared/cluster/`)
+- **Ingestion:** Vercel cron pings the `ingest` Edge Function every 3 minutes; charset-aware RSS fan-out, ETag/If-Modified-Since caching, bounded concurrency, og:image backfill via a separate pgmq-driven consumer
 - **Bias model:** 10 source-level bias categories (`src/lib/bias/config.ts`) rolled up to 3 Medya DNA zones (`src/lib/bias/zones.ts`)
 
-## Architecture
+## Worker stream architecture
+
+Tayf no longer runs long-lived Node workers. The new pipeline is an event-driven stream built entirely from Vercel and Supabase primitives:
+
+- **Vercel cron** `/api/cron/ingest` (every 3 min) invokes the **`ingest` Edge Function**, which fans out across the 144 RSS sources, normalizes items (charset-aware), and upserts into `articles`.
+- An **`AFTER INSERT` trigger** on `articles` enqueues each new politics article onto the **pgmq `cluster_work`** queue. New articles with `image_url IS NULL` are also enqueued onto **`image_backfill`**.
+- **pg_cron** schedules drain the queues by invoking the **`cluster-consumer`** and **`image-consumer`** Edge Functions co-located with the database. Per-message visibility timeouts give at-least-once semantics; archival happens on success, permanent failures (>3 reads) are dropped.
+- **Vercel cron** `/api/cron/headline` (every 5 min) generates neutral Turkish titles for any cluster still missing one.
 
 ```
-   ┌─────────────────┐    ┌──────────────────┐    ┌────────────────────┐
-   │ 144 RSS feeds   │───▶│ rss-worker.mjs   │───▶│ articles (Postgres)│
-   └─────────────────┘    │ (60s cycle)      │    └─────────┬──────────┘
-                          │ + og-image       │              │
-                          └──────────────────┘              ▼
-                                                  ┌──────────────────────┐
-                                                  │ cluster-worker.mjs   │
-                                                  │ (30s cycle, ensemble)│
-                                                  └─────────┬────────────┘
-                                                            ▼
-                                              ┌──────────────────────────┐
-                                              │ clusters / cluster_articles │
-                                              └─────────┬────────────────┘
-   ┌─────────────────┐    ┌──────────────────┐          │
-   │ image-worker.mjs│───▶│ articles.image_url│          │
-   │ (og:image fill) │    └──────────────────┘          │
-   └─────────────────┘                                  ▼
-                                              ┌──────────────────────────┐
-                                              │ Next.js 16 App Router    │
-                                              │  /  /cluster/[id]  /admin│
-                                              └──────────────────────────┘
+   144 RSS feeds ─▶  Vercel cron /api/cron/ingest  ─▶  Edge Function: ingest
+                                                              │
+                                                              ▼
+                                                   Postgres: articles
+                                                              │
+                                       AFTER INSERT trigger ─▶ pgmq: cluster_work, image_backfill
+                                                              │
+                                                pg_cron ─▶ Edge Functions: cluster-consumer, image-consumer
+                                                              │
+                                                              ▼
+                                                clusters / cluster_articles
+                                                              │
+                                              Vercel cron ─▶ /api/cron/headline (title_tr_neutral)
+                                                              │
+                                                              ▼
+                                              Next.js 16 App Router (/, /cluster/[id], /admin)
 ```
+
+Full design rationale, alternatives considered, and migration plan: [`tayf-refactor/architecture/ADR-001-worker-stream-system.md`](../tayf-refactor/architecture/ADR-001-worker-stream-system.md).
 
 ## Local development
 
 ### Prerequisites
 
-- **Node.js 20+**
+- **Node.js 24+**
 - **Docker** (for local Supabase)
 - **`supabase` CLI** ([install](https://supabase.com/docs/guides/cli))
-- **`tmux`** (recommended for running the three workers in panes)
 
 ### Setup
 
@@ -70,17 +73,18 @@ Tayf (Turkish for "spectrum") is a real-time Turkish news media bias analyzer. I
 7. `npm run dev`
 8. Open http://localhost:3000
 
-### Running the workers
+### Running the worker stream
 
-The three continuous workers should run side-by-side, ideally in tmux panes. Each is plain ESM, no TypeScript build step:
+There are no long-running local workers. The full pipeline runs on Vercel cron + Supabase Edge Functions + pgmq once the migrations and functions are deployed:
 
-| Worker | Cycle | Purpose |
+| Trigger | Surface | Purpose |
 |---|---|---|
-| `node scripts/rss-worker.mjs` | 60s | Polls 144 RSS feeds, normalizes & upserts articles, dead-feed circuit breaker, ETag cache |
-| `node scripts/cluster-worker.mjs` | 30s | Groups new politics articles into clusters via fingerprint + TF-IDF + entity ensemble |
-| `node scripts/image-worker.mjs` | 30–120s | Backfills `og:image` for articles whose RSS item lacked media |
+| Vercel cron (`*/3 * * * *`) | `/api/cron/ingest` → Edge Function `ingest` | RSS fan-out, charset-aware normalize, upsert articles |
+| pg_cron (`* * * * *`) | Edge Function `cluster-consumer` | Drains `cluster_work` pgmq, runs the 3-method ensemble, upserts clusters |
+| pg_cron (`*/5 * * * *`) | Edge Function `image-consumer` | Drains `image_backfill` pgmq, SSRF-safe og:image backfill |
+| Vercel cron (`*/5 * * * *`) | `/api/cron/headline` | LLM-generates neutral Turkish title for new clusters |
 
-`DRY_RUN=1` on any worker runs a single cycle then exits — useful for smoke tests. Or if you keep a `tayf-app` tmux session bootstrapped, attach to it instead.
+To exercise the pipeline locally: run `supabase start`, apply migrations through `026`, deploy the Edge Functions with `supabase functions serve`, and hit the cron routes directly with `curl` and a `CRON_SECRET` bearer. See [`docs/migration-guide.md`](docs/migration-guide.md) and [`tayf-refactor/architecture/ADR-001-worker-stream-system.md`](../tayf-refactor/architecture/ADR-001-worker-stream-system.md) for the full operator runbook.
 
 ## Routes
 
@@ -116,6 +120,9 @@ Migration files in `supabase/migrations/`:
 - `014_query_perf.sql` — anti-join index for politics list, drops dead indexes
 - `015_image_attempted_at.sql` — adds `image_backfill_attempted_at` for worker rotation
 - `016_unify_content_hash.sql` — unifies sha1/sha256 cross-regime content_hash twins
+- `024_pgmq_setup.sql` — installs `pgmq`, creates `cluster_work` + `image_backfill` queues, `worker_checkpoint` table, `worker_metrics` view
+- `025_worker_triggers.sql` — `AFTER INSERT` triggers on `articles` that enqueue cluster/image work
+- `026_unify_content_hash_v2.sql` — backfills any sha256 hashes to the canonical sha1-of-shingles form + `CHECK (length(content_hash) = 40)`
 
 ## Key files
 
@@ -123,12 +130,12 @@ Migration files in `supabase/migrations/`:
 - `src/lib/bias/zones.ts` — 10-bias → 3-zone (Hükümet / Bağımsız / Muhalefet) Medya DNA mapping
 - `src/lib/bias/cross-spectrum.ts` — surprise detector ("opposition outlet ran with the government framing")
 - `src/lib/clusters/cluster-detail-query.ts` / `politics-query.ts` — cached data layer with server-side dedupe
-- `scripts/lib/cluster/fingerprint.mjs` — Turkish character-4-gram fingerprint + MinHash
-- `scripts/lib/cluster/entities.mjs` — entity whitelist extractor
-- `scripts/lib/cluster/tfidf.mjs` — rolling-window TF-IDF cosine
-- `scripts/lib/cluster/ensemble.mjs` — weighted combine of all three signals
-- `scripts/lib/cluster/constants.mjs` — `MATCH_THRESHOLD`, `TIME_WINDOW_HOURS`, ensemble weights
-- `scripts/lib/shared/{circuit-breaker,pool,sleep,supabase,log,signal,env,og-image}.mjs` — shared worker primitives
+- `supabase/functions/ingest/` — RSS fan-out + normalize + upsert (charset-aware)
+- `supabase/functions/cluster-consumer/` — pgmq drainer that runs the 3-method ensemble and upserts clusters
+- `supabase/functions/image-consumer/` — pgmq drainer that backfills `og:image` with SSRF guards
+- `supabase/functions/_shared/cluster/{fingerprint,entities,tfidf,ensemble,constants}.ts` — TypeScript port of the clustering libraries
+- `supabase/functions/_shared/{supabase,pgmq,og-image,safe-fetch}.ts` — shared Edge Function primitives
+- `src/app/api/cron/headline/route.ts` — Vercel cron handler that fills in neutral Turkish cluster titles
 
 ## Contributing
 
