@@ -73,8 +73,14 @@ const MEMBER_TITLES_CAP = 16;
 
 const MIN_ARTICLE_COUNT = 3;
 
-const LLM_API_URL = "https://api.anthropic.com/v1/messages";
-const LLM_MODEL = "claude-haiku-4-5-20251001";
+// Vendor URL + model id default to the current upstream provider, but operators
+// can swap providers without a code change by setting LLM_API_URL / LLM_MODEL
+// in the runtime environment. The hardcoded fallback keeps backward-compat
+// with deployments that have not yet set these vars.
+const LLM_API_URL =
+  process.env.LLM_API_URL ?? "https://api.anthropic.com/v1/messages";
+const LLM_MODEL =
+  process.env.LLM_MODEL ?? "claude-haiku-4-5-20251001";
 
 /**
  * Constant-time bearer-token check.
@@ -297,8 +303,19 @@ export const GET = withApiErrors(async (request: Request) => {
     try {
       neutral = await rewriteClusterHeadline({ member_titles: memberTitles });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      perCluster[c.id] = { status: "errored", error: msg };
+      // Keep the raw `err` out of the response body — it can carry vendor
+      // identifiers, prompt fragments, or upstream rate-limit details that
+      // we do not want to leak to the caller. The full message still
+      // reaches Sentry + Edge logs via console.error below.
+      console.error(
+        "[headline-cron] LLM call failed for cluster",
+        c.id,
+        err,
+      );
+      perCluster[c.id] = {
+        status: "errored",
+        error: "rewriteClusterHeadline failed",
+      };
       errored++;
       continue;
     }
