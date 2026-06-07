@@ -107,6 +107,15 @@ If any of these return nothing or 404, STOP. Do not proceed to step 4 — `/api/
 
 Migration 026 is idempotent (gated on the hash regime); re-running it is safe.
 
+### 1a. Expose the `pgmq` schema to PostgREST
+
+The pg_cron drains in step 3 invoke the Edge Functions, but operators (and the curl smoke at the end of step 2) also need to reach `pgmq.read` / `pgmq.metrics_all` via the project's REST API. PostgREST only routes requests for schemas listed under **Exposed schemas**.
+
+- **Hosted Supabase (production).** In the Supabase Dashboard, open **Project Settings → API → Exposed schemas** and add `pgmq` to the comma-separated list (the existing entries are `public` and `graphql_public`). Click **Save**. PostgREST hot-reloads within a few seconds; no Edge Function or pg_cron restart is required.
+- **Local `supabase start`.** This branch already includes the equivalent change in `supabase/config.toml` (`[api].schemas = ["public", "graphql_public", "pgmq"]`). A fresh `supabase start` will pick it up; if you already have the local stack running, restart it with `supabase stop && supabase start`.
+
+If you skip this step, the smoke curl at the end of step 2 returns the PostgREST `PGRST202` error ("Could not find the function pgmq.read in the schema cache") and the `worker_metrics` view continues to work (it lives in `public`) — the symptom is operator-tooling-shaped, not user-facing-shaped, but it WILL hide queue-depth problems during the cutover.
+
 ---
 
 ## 2. Deploy the Supabase Edge Functions
@@ -153,6 +162,23 @@ curl -sS -X POST -H "Authorization: Bearer $SR" \
 ```
 
 A 401 means the bearer check rejected the request — re-check that `SUPABASE_SERVICE_ROLE_KEY` in the Edge Function secrets matches the key in `$SR`. A 403 from the gateway means the JWT layer rejected it before the handler ran — confirm the deploys did NOT pass `--no-verify-jwt`.
+
+**Smoke-test that `pgmq` is reachable via PostgREST.** This confirms step 1a took effect — if the schema is not exposed, the response below is `PGRST202` and operator tooling that reads queue depth will silently fail.
+
+```bash
+# $SUPA_URL is your project's REST endpoint, e.g.
+# https://$PROJECT_REF.supabase.co
+export SUPA_URL="https://$PROJECT_REF.supabase.co"
+
+curl -sS -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SR" \
+  -H "Content-Profile: pgmq" \
+  -d '{"queue_name":"cluster_work","vt":1,"qty":1}' \
+  "$SUPA_URL/rest/v1/rpc/read"
+```
+
+Expected: an empty JSON array `[]` (no messages currently waiting past the visibility timeout) or a one-element array with a `cluster_work` message. Any response whose body contains `"code":"PGRST202"` means **step 1a was not applied** — go back and add `pgmq` to the Dashboard's Exposed schemas list, then re-run this curl. A 401 means `$SR` is wrong; a 404 on the URL itself means PostgREST isn't running on the project (unrelated to this change).
 
 ---
 
@@ -293,6 +319,37 @@ curl -sS -H "Authorization: Bearer $CRON_SECRET" \
   "https://<your-tayf-domain>/api/cron/headline"
 ```
 
+**Trigger the cron's first tick manually** rather than waiting for the */5
+schedule to fire. Vercel only attaches a cron once a deploy is promoted to
+production AND the first natural tick lands, so a mis-configured env-var on
+a fresh deploy is silent until ~5 minutes after rollout — exactly when an
+operator has already moved on. The CLI shortcut:
+
+```bash
+vercel cron trigger /api/cron/headline
+```
+
+Older Vercel CLI versions (< 35) do not expose the `cron trigger` subcommand;
+fall back to invoking the route directly with the bearer header (the same
+call Vercel's scheduler makes internally):
+
+```bash
+curl -sS -H "Authorization: Bearer $CRON_SECRET" \
+  "https://<your-tayf-domain>/api/cron/headline"
+```
+
+Either form must return HTTP 200 with a body of the shape
+
+```json
+{ "success": true, "rewrote": 0, "skipped": 0, "errored": 0, "timestamp": "..." }
+```
+
+(the numeric counters depend on how many clusters were waiting; `success`,
+`rewrote`, `skipped`, `errored`, and `timestamp` are always present). A 503
+with body `{"error":"CRON_SECRET is not configured"}` means the env-var step
+above did not propagate — see the troubleshooting note below before
+declaring the deploy healthy.
+
 Within ~15 minutes of the deploy, `/api/health` should report `clustering.lag_minutes < 15`. If it doesn't, see "Troubleshooting" below.
 
 ---
@@ -391,6 +448,30 @@ select * from pgmq.read('image_backfill', 60, 5);
 -- and the consumer should be deleting it — if it's not, that's a bug
 -- in image-consumer.
 ```
+
+### `/api/cron/headline` returns 503 `CRON_SECRET is not configured`
+
+The route is FAIL-CLOSED on a missing or empty `CRON_SECRET` — every
+invocation (manual curl, `vercel cron trigger`, or the scheduled */5 tick)
+will 503 until the env-var lands. Cause is almost always one of:
+
+- `vercel env add CRON_SECRET production` was run but **no redeploy** has
+  happened since — env-vars only attach at build time, so re-run
+  `vercel --prod` and re-test against the new deployment URL.
+- The env-var was set on a different environment (Preview / Development)
+  rather than Production. Confirm with
+  `vercel env ls | grep CRON_SECRET` — the row tagged `production` must
+  exist.
+- The value pasted was empty (just pressing Enter at the prompt sets the
+  empty string, which the route treats as unset). Re-add it with
+  `vercel env rm CRON_SECRET production && vercel env add CRON_SECRET production`
+  and paste a fresh 32+ char random string.
+
+A boot-time warning lands in the Vercel build / function logs when the
+route module is initialised in production without `CRON_SECRET` set
+(`[headline-cron] CRON_SECRET is not set; route will fail-closed with 503
+on every invocation`). Grep the build log or the function's runtime log
+for that line to confirm which deployment is the broken one.
 
 ### Edge Function cold-start spikes
 
