@@ -109,6 +109,19 @@ describe("migration 025_worker_triggers.sql (static)", () => {
     expect(sql).toMatch(/drop\s+trigger\s+if\s+exists\s+articles_image_enqueue/i);
   });
 
+  it("locks SECURITY DEFINER trigger functions to an empty search_path", () => {
+    // Round-6 P1 tripwire: the original migration set `search_path = public,
+    // pgmq, pg_temp` on the SECURITY DEFINER trigger functions, which let a
+    // role with CREATE on pg_temp shadow unqualified calls inside the
+    // function body and execute under the function owner. The fix is empty
+    // search_path + schema-qualified identifiers. If either assertion
+    // regresses, the audit-era footgun is back.
+    expect(sql).not.toMatch(/set\s+search_path[^\n]*pg_temp/i);
+    expect(sql).toMatch(/set\s+search_path\s*=\s*''/i);
+    // Identifiers must be schema-qualified inside the SECURITY DEFINER body.
+    expect(sql).toMatch(/pg_catalog\.jsonb_build_object/);
+  });
+
   it("grants pgmq.send EXECUTE to the SECURITY DEFINER owner roles (postgres, supabase_admin)", () => {
     // Round-4 fix: the SECURITY DEFINER trigger functions invoke pgmq.send
     // under the function-owner identity; without this grant the trigger

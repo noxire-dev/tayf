@@ -88,7 +88,13 @@ create function enqueue_cluster_work()
 returns trigger
 language plpgsql
 security definer
-set search_path = public, pgmq, pg_temp
+-- Round-6 P1 fix: lock search_path to empty and fully qualify every
+-- identifier. The previous `public, pgmq, pg_temp` setting let any
+-- session role with CREATE on pg_temp shadow an unqualified call from
+-- inside this SECURITY DEFINER function (e.g. a hostile pgmq.send) and
+-- execute under the function-owner identity. Empty search_path + schema
+-- qualification removes that footgun.
+set search_path = ''
 as $$
 begin
   -- Skip non-politics rows. The whitelist mirrors migration 008's
@@ -100,7 +106,7 @@ begin
 
   perform pgmq.send(
     'cluster_work',
-    jsonb_build_object('article_id', NEW.id)
+    pg_catalog.jsonb_build_object('article_id', NEW.id)
   );
 
   return NEW;
@@ -149,7 +155,10 @@ create function enqueue_image_backfill()
 returns trigger
 language plpgsql
 security definer
-set search_path = public, pgmq, pg_temp
+-- Round-6 P1 fix (mirrors enqueue_cluster_work above): empty search_path
+-- + schema-qualified identifiers so pg_temp shadowing cannot reach the
+-- SECURITY DEFINER body.
+set search_path = ''
 as $$
 begin
   -- Only enqueue if the new row lacks an image. Rows that already carry
@@ -161,7 +170,7 @@ begin
 
   perform pgmq.send(
     'image_backfill',
-    jsonb_build_object('article_id', NEW.id)
+    pg_catalog.jsonb_build_object('article_id', NEW.id)
   );
 
   return NEW;
