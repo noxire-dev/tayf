@@ -24,7 +24,7 @@ import {
   readBatch,
 } from "../_shared/pgmq.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
-import { initSentry, withSentry } from "../_shared/sentry.ts";
+import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 
 // Initialise Sentry at module load. No-op if SENTRY_DSN is unset.
 await initSentry("cluster-consumer");
@@ -1038,7 +1038,11 @@ Deno.serve(withSentry("cluster-consumer", async (req: Request) => {
     });
   } catch (err) {
     const request_id = crypto.randomUUID();
-    // Log the full error (stack + message) to Edge Function logs only.
+    // Round-6 P1: forward to Sentry explicitly. The withSentry wrapper
+    // only sees thrown errors; this catch builds a 500 response so the
+    // throw never reaches the wrapper.
+    captureException("cluster-consumer", err);
+    // Log the full error (stack + message) to Edge Function logs as well.
     console.error(`[cluster-consumer] ${request_id}`, err);
     // Mark the cache as stale so a fresh invocation rebuilds from DB truth.
     clusterContextCache = null;

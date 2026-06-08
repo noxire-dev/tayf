@@ -26,7 +26,7 @@ import type { RssSource } from "../_shared/rss/fetcher.ts";
 import type { NormalizedArticle } from "../_shared/rss/normalize.ts";
 import { normalizeArticles } from "../_shared/rss/normalize.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
-import { initSentry, withSentry } from "../_shared/sentry.ts";
+import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 import { createServiceClient } from "../_shared/supabase.ts";
 
 await initSentry("ingest");
@@ -245,7 +245,13 @@ Deno.serve(withSentry("ingest", async (req: Request) => {
     });
   } catch (err) {
     const request_id = crypto.randomUUID();
-    // Log the full error (stack + message) to Edge Function logs only.
+    // Round-6 P1: forward to Sentry explicitly. The withSentry wrapper
+    // only sees thrown errors; this catch builds a 500 response so the
+    // throw never reaches the wrapper. Without this call the error
+    // would only ever land in the Edge Function logs (not paged).
+    captureException("ingest", err);
+    // Log the full error (stack + message) to Edge Function logs as well
+    // so the request_id can be correlated with the per-line context.
     console.error(`[ingest] ${request_id}`, err);
     return new Response(
       JSON.stringify({ ok: false, error: "internal-error", request_id }),

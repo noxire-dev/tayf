@@ -85,6 +85,36 @@ export async function initSentry(functionName: string): Promise<void> {
 }
 
 /**
+ * Capture an exception explicitly. Use this from inner catch blocks that
+ * build a 500 response instead of re-throwing — `withSentry` only sees
+ * thrown errors, so a handler that catches and returns 500 would
+ * otherwise be invisible to Sentry. Includes the function name as a tag
+ * so dashboards can filter by `tag:function:<name>` consistently with
+ * events from `withSentry`.
+ *
+ * No-op when Sentry is unconfigured. Never throws — observability
+ * failures must not change the request outcome.
+ *
+ * Round-6 P1 fix: every Edge Function had a top-level
+ * `try { ... } catch (err) { return new Response(500) }` that swallowed
+ * the throw before `withSentry` could see it; without an explicit
+ * capture call those errors only ever reached the Edge Function logs
+ * (which are not paged), which is the same blind-spot pattern that
+ * produced the original 7-day-undetected outage.
+ */
+export function captureException(functionName: string, err: unknown): void {
+  if (Sentry === null) return;
+  try {
+    Sentry.captureException(err, { tags: { function: functionName } });
+  } catch (sentryErr) {
+    console.error(
+      `[sentry] captureException failed for ${functionName}:`,
+      sentryErr,
+    );
+  }
+}
+
+/**
  * Wrap a Deno.serve handler so unhandled errors are captured by Sentry
  * (when configured) before being re-thrown to the surrounding error
  * machinery. The function name is included as a tag on every event.

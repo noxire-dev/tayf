@@ -35,7 +35,7 @@ import {
   isValidImageUrl,
 } from "../_shared/og-image.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
-import { initSentry, withSentry } from "../_shared/sentry.ts";
+import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 
 await initSentry("image-consumer");
 
@@ -409,7 +409,11 @@ Deno.serve(withSentry("image-consumer", async (req: Request) => {
     });
   } catch (err) {
     const request_id = crypto.randomUUID();
-    // Log the full error (stack + message) to Edge Function logs only.
+    // Round-6 P1: forward to Sentry explicitly. The withSentry wrapper
+    // only sees thrown errors; this catch builds a 500 response so the
+    // throw never reaches the wrapper.
+    captureException("image-consumer", err);
+    // Log the full error (stack + message) to Edge Function logs as well.
     console.error(`[image-consumer] ${request_id}`, err);
     return new Response(
       JSON.stringify({ ok: false, error: "internal-error", request_id }),
