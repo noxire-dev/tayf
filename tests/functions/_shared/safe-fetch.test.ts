@@ -126,6 +126,56 @@ describe("isPrivateAddress", () => {
   it("accepts a routable public IPv4 (1.1.1.1)", () => {
     expect(isPrivateAddress("1.1.1.1")).toBeNull();
   });
+
+  // Round-6 P0 regression — IPv4-mapped IPv6 must not bypass the v4 blocks.
+  // Before the fix, every literal below returned null and a hostile feed
+  // could pull EC2 IMDS, AWS metadata, loopback, or RFC1918 over an HTTP
+  // request to `http://[::ffff:<addr>]/`.
+  it("flags ::ffff:169.254.169.254 (IPv4-mapped IMDS)", () => {
+    expect(isPrivateAddress("::ffff:169.254.169.254")).toMatch(/link-local/i);
+  });
+
+  it("flags ::ffff:127.0.0.1 (IPv4-mapped loopback)", () => {
+    expect(isPrivateAddress("::ffff:127.0.0.1")).toMatch(/loopback/i);
+  });
+
+  it("flags ::ffff:10.0.0.1 (IPv4-mapped RFC1918)", () => {
+    expect(isPrivateAddress("::ffff:10.0.0.1")).toMatch(/RFC1918/i);
+  });
+
+  it("rejects ::ffff:1.1.1.1 (mapped-but-public also blocked)", () => {
+    // Legitimate clients have no reason to dial public IPv4 through the
+    // mapped form; the only common case is intentional SSRF evasion.
+    expect(isPrivateAddress("::ffff:1.1.1.1")).toMatch(/IPv4-mapped/i);
+  });
+
+  it("flags :: (unspecified)", () => {
+    expect(isPrivateAddress("::")).toMatch(/unspecified/i);
+  });
+
+  it("flags 240.1.2.3 (future-use)", () => {
+    expect(isPrivateAddress("240.1.2.3")).toMatch(/future-use/i);
+  });
+
+  it("flags 255.255.255.255 (caught by future-use 240/4 superset)", () => {
+    expect(isPrivateAddress("255.255.255.255")).toMatch(/future-use/i);
+  });
+
+  it("flags 224.0.0.1 (multicast)", () => {
+    expect(isPrivateAddress("224.0.0.1")).toMatch(/multicast/i);
+  });
+
+  it("flags 198.18.0.1 (benchmark)", () => {
+    expect(isPrivateAddress("198.18.0.1")).toMatch(/benchmark/i);
+  });
+
+  it("flags 198.51.100.1 (TEST-NET-2)", () => {
+    expect(isPrivateAddress("198.51.100.1")).toMatch(/TEST-NET-2/);
+  });
+
+  it("flags ff02::1 (IPv6 multicast)", () => {
+    expect(isPrivateAddress("ff02::1")).toMatch(/multicast/i);
+  });
 });
 
 // ---------------------------------------------------------------------------

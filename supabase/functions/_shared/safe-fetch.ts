@@ -10,17 +10,28 @@
 // Guarantees:
 //   1. Resolves the target hostname via Deno.resolveDns for BOTH A and AAAA
 //      records. Any record that falls inside the private/special-purpose
-//      block list (RFC 1918, CGNAT, loopback, link-local, ULA, etc.) causes
-//      the request to be rejected before a connection is opened.
-//   2. Redirects are manual (`redirect: "manual"`). Each Location header is
+//      block list (RFC 1918, CGNAT, loopback, link-local, ULA, IPv4-mapped
+//      IPv6, multicast, reserved, etc.) causes the request to be rejected
+//      before a connection is opened.
+//   2. For plain HTTP, after the allow-check we PIN the dial to the
+//      resolved literal IP (preserving the original Host via header) so
+//      the platform `fetch` does not re-resolve and a DNS-rebinding
+//      attacker cannot serve a public IP to our check and a private IP
+//      to the dial. For HTTPS we keep the hostname in the URL so SNI/TLS
+//      verifies — that residual rebinding risk is the price of correct
+//      TLS handshakes.
+//   3. Redirects are manual (`redirect: "manual"`). Each Location header is
 //      re-validated through the same allowlist on every hop, with a maximum
 //      of MAX_REDIRECTS hops. This blocks the "first-fetch is public, then
 //      redirect to 169.254.169.254" exfiltration pattern.
-//   3. Only http(s) URLs are allowed. file://, ftp://, gopher://, etc. are
+//   4. Only http(s) URLs are allowed. file://, ftp://, gopher://, etc. are
 //      rejected before resolution.
-//   4. The streamed body is bounded by `maxBytes` (the caller-supplied cap,
+//   5. The streamed body is bounded by `maxBytes` (the caller-supplied cap,
 //      typically 50 KB). The HTML-aware early-stop on `</head>` lives in
 //      the og-image extractor; this module only enforces the byte ceiling.
+//   6. IPv4-mapped IPv6 literals (`::ffff:127.0.0.1` etc.) and
+//      IPv4-compatible literals are unwrapped before block-checking so
+//      `http://[::ffff:169.254.169.254]/` cannot dodge the IPv4 list.
 //
 // IMPORTANT: this module is Deno-only. Node fetch has no equivalent of
 // Deno.resolveDns; the Vercel cron path uses a different code path that
@@ -60,10 +71,12 @@ interface IPv4Block {
 
 interface IPv6Block {
   readonly kind: "v6";
-  // First two 64-bit halves of the network address (BigInt). For all blocks
-  // we care about, the prefix is <= 64 bits, so we only need the high half
-  // plus the prefix length to match.
+  // 128-bit network address split into two 64-bit halves. For prefix <= 64
+  // we only consult `high`; for /65–/128 we also need `low`. The /128 path
+  // previously hard-coded `low === 1n`, which silently mis-handled any
+  // future /128 entry other than ::1 (Round-6 P2 fix).
   readonly high: bigint;
+  readonly low: bigint;
   readonly prefix: number; // 0..128
   readonly label: string;
 }
@@ -160,14 +173,18 @@ function parseIPv6Block(cidr: string, label: string): IPv6Block {
   if (parsed === null || !Number.isFinite(prefix) || prefix < 0 || prefix > 128) {
     throw new Error(`invalid IPv6 CIDR: ${cidr}`);
   }
-  // We only support /0..../64 — every block in BLOCKED_BLOCKS sits at /128, /7,
-  // /10, /32, so the high-half-only match is sufficient. For the /128 case
-  // (::1) we still anchor on the high half (0) and verify the low half in
-  // matchIPv6Block.
-  return { kind: "v6", high: parsed.high, prefix, label };
+  // Blocks may sit anywhere in 0..128. Store both halves so /65–/128 matches
+  // work; for prefix <= 64 the low half is unused (matchIPv6Block ignores it).
+  return { kind: "v6", high: parsed.high, low: parsed.low, prefix, label };
 }
 
 const BLOCKED_BLOCKS: readonly IPBlock[] = [
+  // IPv4 — every range that is unsafe to dial from an unprivileged
+  // outbound fetcher. RFC1918 + loopback + link-local + this-net + CGNAT
+  // are obvious; Round-6 P2 added the reserved / TEST-NET / benchmark /
+  // future-use / multicast / broadcast blocks so a misconfigured outlet
+  // (or an attacker who can pick an IP) cannot trick us into a sensitive
+  // dial. The "this-network" /8 covers 0.0.0.0 itself.
   parseIPv4Block("10.0.0.0/8", "RFC1918 10.0.0.0/8"),
   parseIPv4Block("172.16.0.0/12", "RFC1918 172.16.0.0/12"),
   parseIPv4Block("192.168.0.0/16", "RFC1918 192.168.0.0/16"),
@@ -175,10 +192,22 @@ const BLOCKED_BLOCKS: readonly IPBlock[] = [
   parseIPv4Block("169.254.0.0/16", "link-local 169.254.0.0/16"),
   parseIPv4Block("0.0.0.0/8", "this-network 0.0.0.0/8"),
   parseIPv4Block("100.64.0.0/10", "CGNAT 100.64.0.0/10"),
+  parseIPv4Block("198.18.0.0/15", "benchmark 198.18.0.0/15"),
+  parseIPv4Block("192.0.0.0/24", "IETF protocol 192.0.0.0/24"),
+  parseIPv4Block("192.0.2.0/24", "TEST-NET-1 192.0.2.0/24"),
+  parseIPv4Block("198.51.100.0/24", "TEST-NET-2 198.51.100.0/24"),
+  parseIPv4Block("203.0.113.0/24", "TEST-NET-3 203.0.113.0/24"),
+  parseIPv4Block("224.0.0.0/4", "multicast 224.0.0.0/4"),
+  // future-use 240.0.0.0/4 covers 255.255.255.255 (limited broadcast),
+  // so no separate /32 entry is needed for the broadcast literal.
+  parseIPv4Block("240.0.0.0/4", "future-use 240.0.0.0/4"),
+  // IPv6.
+  parseIPv6Block("::/128", "unspecified ::"),
   parseIPv6Block("::1/128", "IPv6 loopback ::1"),
   parseIPv6Block("fc00::/7", "IPv6 ULA fc00::/7"),
   parseIPv6Block("fe80::/10", "IPv6 link-local fe80::/10"),
   parseIPv6Block("2001:db8::/32", "IPv6 doc 2001:db8::/32"),
+  parseIPv6Block("ff00::/8", "IPv6 multicast ff00::/8"),
 ];
 
 function matchIPv4Block(addr: number, block: IPv4Block): boolean {
@@ -187,17 +216,47 @@ function matchIPv4Block(addr: number, block: IPv4Block): boolean {
 
 function matchIPv6Block(parsed: { high: bigint; low: bigint }, block: IPv6Block): boolean {
   if (block.prefix === 128) {
-    // Exact match on the full 128 bits; only ::1 currently uses this.
-    return parsed.high === block.high && parsed.low === 1n;
+    // Exact 128-bit match. Previously hard-coded `low === 1n`, which
+    // worked only for ::1 and would silently bypass any future /128
+    // entry (e.g. ::, which the unspecified-address block now also uses).
+    return parsed.high === block.high && parsed.low === block.low;
   }
-  // All other blocks live in the high 64 bits (prefix <= 64).
+  if (block.prefix > 64) {
+    // /65..127: match the full high half AND the top (prefix-64) bits of
+    // the low half.
+    if (parsed.high !== block.high) return false;
+    const shift = BigInt(128 - block.prefix);
+    return (parsed.low >> shift) === (block.low >> shift);
+  }
+  // /0..64: only the top (prefix) bits of the high half matter.
   const shift = BigInt(64 - block.prefix);
-  if (shift < 0n) {
-    // Shouldn't happen given BLOCKED_BLOCKS, but guard so a misuse doesn't
-    // silently bypass the check.
-    return false;
-  }
+  if (shift < 0n) return false;
   return (parsed.high >> shift) === (block.high >> shift);
+}
+
+/**
+ * If `parsed` is an IPv4-mapped (`::ffff:0:0/96`) or IPv4-compatible
+ * (`::/96`, excluding `::` and `::1`) IPv6 literal, extract the embedded
+ * IPv4 address as a uint32. Returns null if the address is a pure v6.
+ *
+ * This is the heart of the Round-6 P0 fix: without it,
+ * `http://[::ffff:127.0.0.1]/` and `http://[::ffff:169.254.169.254]/`
+ * dodge every IPv4 block and reach loopback / the EC2 metadata service.
+ */
+function ipv4MappedToV4(parsed: { high: bigint; low: bigint }): number | null {
+  if (parsed.high !== 0n) return null;
+  // IPv4-mapped: ::ffff:0:0/96 — top 80 bits zero, next 16 bits 0xffff.
+  if ((parsed.low >> 32n) === 0xffffn) {
+    return Number(parsed.low & 0xffffffffn) >>> 0;
+  }
+  // IPv4-compatible: ::0:0:0:0:X.Y.Z.W (deprecated but historically routable).
+  // Exclude :: (unspecified) and ::1 (loopback) — those are caught by their
+  // own /128 blocks; everything else that fits in the low 32 bits is treated
+  // as the embedded v4.
+  if ((parsed.low >> 32n) === 0n && parsed.low !== 0n && parsed.low !== 1n) {
+    return Number(parsed.low & 0xffffffffn) >>> 0;
+  }
+  return null;
 }
 
 /**
@@ -222,6 +281,22 @@ export function isPrivateAddress(ip: string): string | null {
   }
   const v6 = parseIPv6(ip);
   if (v6 !== null) {
+    // Round-6 P0 fix: before running the v6 block list, unwrap any
+    // IPv4-mapped / IPv4-compatible literal and re-test the embedded v4
+    // against every v4 block. Without this, `::ffff:127.0.0.1`,
+    // `::ffff:169.254.169.254`, etc. silently pass the guard.
+    const mapped = ipv4MappedToV4(v6);
+    if (mapped !== null) {
+      for (const block of BLOCKED_BLOCKS) {
+        if (block.kind === "v4" && matchIPv4Block(mapped, block)) {
+          return `${block.label} (via IPv4-mapped IPv6)`;
+        }
+      }
+      // Mapped-but-public: still reject. Legitimate clients have no reason
+      // to dial a public v4 through the IPv4-mapped form; the only common
+      // use cases are intentional SSRF evasion and broken middleboxes.
+      return "IPv4-mapped IPv6 literal (use the bare IPv4 form instead)";
+    }
     for (const block of BLOCKED_BLOCKS) {
       if (block.kind === "v6" && matchIPv6Block(v6, block)) return block.label;
     }
@@ -243,6 +318,49 @@ export function isPrivateAddress(ip: string): string | null {
  * Returns null if the host is safe, or a human-readable reason string if it
  * should be blocked.
  */
+/**
+ * Resolve a hostname and return the public address to pin the fetch against,
+ * or a reason string if the host should be blocked.
+ *
+ * Returns `{ pinIp, ipFamily }` on success. Callers should rewrite the URL's
+ * hostname to the pinned literal (bracketed for v6) and re-check the literal
+ * before opening the socket — that closes the DNS-rebinding TOCTOU window
+ * that exists when the platform `fetch` re-resolves after our check.
+ */
+export async function resolveAndPin(
+  hostname: string,
+): Promise<{ pinIp: string; ipFamily: "v4" | "v6" } | string> {
+  const reason = await assertHostnameIsPublic(hostname);
+  if (reason !== null) return reason;
+  // The literal-IP fast path in assertHostnameIsPublic already validated the
+  // address; pin to the literal itself so the fetch dials exactly what we
+  // checked.
+  const bareHost = hostname.replace(/^\[|\]$/g, "");
+  if (parseIPv4(bareHost) !== null) {
+    return { pinIp: bareHost, ipFamily: "v4" };
+  }
+  if (parseIPv6(bareHost) !== null) {
+    return { pinIp: bareHost, ipFamily: "v6" };
+  }
+  // Hostname path. Re-resolve and pick the first public record. This second
+  // resolution is racing with the one inside assertHostnameIsPublic, but
+  // because we ALSO re-validate the pinned literal below, a rebinding
+  // attacker who flips between public and private records will be caught.
+  const [a4, a6] = await Promise.allSettled([
+    Deno.resolveDns(bareHost, "A"),
+    Deno.resolveDns(bareHost, "AAAA"),
+  ]);
+  const v4s = a4.status === "fulfilled" ? a4.value : [];
+  const v6s = a6.status === "fulfilled" ? a6.value : [];
+  for (const addr of v4s) {
+    if (isPrivateAddress(addr) === null) return { pinIp: addr, ipFamily: "v4" };
+  }
+  for (const addr of v6s) {
+    if (isPrivateAddress(addr) === null) return { pinIp: addr, ipFamily: "v6" };
+  }
+  return "no public IP found in DNS records (rebinding attempt rejected)";
+}
+
 export async function assertHostnameIsPublic(hostname: string): Promise<string | null> {
   // Literal IP fast path — skip DNS, just validate the literal. Only treat
   // the hostname as a literal IP if it actually parses as one; otherwise
@@ -403,10 +521,38 @@ export async function safeFetch(
         throw new SafeFetchError(`URL rejected: ${validated} (url=${currentUrl})`);
       }
 
-      response = await fetch(validated.toString(), {
+      // Round-6 P1 fix (DNS rebinding TOCTOU): rewrite the URL to use the
+      // pinned IP literal we already validated. The platform `fetch` would
+      // otherwise re-resolve the hostname through its own resolver, opening
+      // a window where an attacker who controls the authoritative DNS can
+      // serve a public IP to our check and a private IP to fetch. We
+      // preserve the original Host via header so virtual-hosted servers
+      // still route correctly, and SNI/TLS still validates because the
+      // platform Deno client uses the URL's hostname for the SNI handshake
+      // — for HTTPS we therefore keep the hostname unrewritten and rely on
+      // the same-resolver lookup, accepting that residual risk in exchange
+      // for not breaking TLS. For plain HTTP we pin to the literal.
+      let dialUrl = validated.toString();
+      const dialHeaders = new Headers(opts.headers ?? undefined);
+      if (validated.protocol === "http:") {
+        const pinned = await resolveAndPin(validated.hostname);
+        if (typeof pinned === "string") {
+          throw new SafeFetchError(`pin rejected: ${pinned} (url=${currentUrl})`);
+        }
+        if (!dialHeaders.has("host")) {
+          dialHeaders.set("host", validated.host);
+        }
+        const literalHost =
+          pinned.ipFamily === "v6" ? `[${pinned.pinIp}]` : pinned.pinIp;
+        const portSuffix = validated.port ? `:${validated.port}` : "";
+        dialUrl =
+          `${validated.protocol}//${literalHost}${portSuffix}${validated.pathname}${validated.search}`;
+      }
+
+      response = await fetch(dialUrl, {
         method: "GET",
         signal: controller.signal,
-        headers: opts.headers,
+        headers: dialHeaders,
         redirect: "manual",
       });
 
