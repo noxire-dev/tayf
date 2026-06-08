@@ -55,9 +55,9 @@ If you cannot or do not want to link, every `supabase` command below also accept
 
 ---
 
-## 1. Apply migrations 024, 025, 026 in order
+## 1. Apply migrations 024, 025, 026, 027, 028 in order
 
-These migrate the database side of the new system: pgmq install, the article-insert triggers that enqueue work, and the content-hash unification.
+These migrate the database side of the new system: pgmq install, the article-insert triggers that enqueue work, the content-hash unification, the SECURITY DEFINER `cluster_link_atomic` RPC that serializes cluster_articles writes under a per-cluster advisory lock, and the clean-drop of the never-wired `worker_checkpoint` table.
 
 ```bash
 # From the repo root.
@@ -73,11 +73,14 @@ supabase db push
 psql "$DATABASE_URL" -f supabase/migrations/024_pgmq_setup.sql
 psql "$DATABASE_URL" -f supabase/migrations/025_worker_triggers.sql
 psql "$DATABASE_URL" -f supabase/migrations/026_unify_content_hash_v2.sql
+psql "$DATABASE_URL" -f supabase/migrations/027_cluster_link_atomic.sql
+psql "$DATABASE_URL" -f supabase/migrations/028_drop_worker_checkpoint.sql
 
 # Then reconcile the ledger so the CLI does not retry:
 psql "$DATABASE_URL" -c "
   insert into supabase_migrations.schema_migrations (version) values
-    ('20240000000024'), ('20240000000025'), ('20240000000026')
+    ('20240000000024'), ('20240000000025'), ('20240000000026'),
+    ('20240000000027'), ('20240000000028')
   on conflict do nothing;
 "
 ```
@@ -550,22 +553,28 @@ If the new system misbehaves and you need to revert to the legacy per-worker scr
    update cron.job set active = false where jobname in ('cluster-drain', 'image-drain', 'ingest-drain');
    ```
 
-2. There is no longer a Vercel cron path to revert to: the worker-stream refactor removed `/api/cron/ingest`, `/api/cron/cluster`, and `/api/cron/backfill-images` from `vercel.ts` and the routes themselves are deleted from `src/app/api/cron/`. If you need them back, revert the refactor commit set in git before redeploying.
-
-3. Restart the legacy per-worker scripts. There is no orchestrator wrapper any more (`scripts/dev.mjs` was removed in the refactor); start each worker in its own tmux pane or systemd unit:
+2. Revert the Edge Function deployments to the prior bundle. The Supabase CLI does not expose a first-class "redeploy previous version" flag, so the procedure is:
 
    ```bash
-   tmux new-session -d -s tayf-app -n rss      'node scripts/rss-worker.mjs'
-   tmux new-window  -t tayf-app    -n cluster  'node scripts/cluster-worker.mjs'
-   tmux new-window  -t tayf-app    -n image    'node scripts/image-worker.mjs'
-   tmux new-window  -t tayf-app    -n headline 'node scripts/headline-worker.mjs'
+   # PRIOR_SHA is the merge base of refactor/worker-stream-system on main
+   # (or any earlier commit that was previously deployed). Per-function:
+   git checkout $PRIOR_SHA -- supabase/functions/ingest/
+   supabase functions deploy ingest --project-ref $PROJECT_REF
+   git checkout $PRIOR_SHA -- supabase/functions/cluster-consumer/
+   supabase functions deploy cluster-consumer --project-ref $PROJECT_REF
+   git checkout $PRIOR_SHA -- supabase/functions/image-consumer/
+   supabase functions deploy image-consumer --project-ref $PROJECT_REF
+   # Restore the working tree once the redeploys succeed.
+   git checkout HEAD -- supabase/functions/
    ```
 
-   Each worker reads `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, and (for the headline worker) `ANTHROPIC_API_KEY` from the environment — export them in the shell that launches tmux, or write them into a sourced `.env`.
+   If `$PRIOR_SHA` predates this refactor (i.e. the Edge Functions did not exist), deploy a no-op stub instead (a `Deno.serve` that returns 200 to the bearer-authed health probe) so the pg_cron pokes do not generate 404s while you decide whether to keep the queues idle or fully decommission them.
 
-4. Migration 026's CHECK constraint stays in place (it's forward-compatible — the legacy worker also writes 40-char sha1 hashes). Migrations 024 and 025 also stay; the new triggers do no harm with the queues unused.
+3. The legacy per-worker scripts (`scripts/rss-worker.mjs` etc.) are **deleted** from this branch (commit 7d84ece). If you need them back, revert the refactor commit set in git before redeploying Vercel — there is no way to restart them from the post-refactor working tree alone.
 
-A full rollback (drop the queues + remove the triggers) requires writing migration 027 to undo 024/025. That migration is not pre-prepared because the user's instruction was *forward-only*: every recovery from a bad worker-stream deployment should resolve forward, not backward.
+4. Migration 026's CHECK constraint stays in place (it's forward-compatible — the legacy worker also writes 40-char sha1 hashes). Migrations 024, 025, 027, and 028 also stay; the new triggers and the `cluster_link_atomic` RPC do no harm with the queues paused and no Edge Function dialling the RPC.
+
+A *destructive* rollback (drop the queues + remove the triggers + drop `cluster_link_atomic`) is intentionally not pre-prepared because the user's instruction was *forward-only*: every recovery from a bad worker-stream deployment should resolve forward, not backward. If a destructive rollback is genuinely required, hand-write a migration that drops `cluster_link_atomic`, the two `enqueue_*` trigger functions and their triggers, the `worker_metrics` view, and the pgmq queues (`select pgmq.drop_queue('cluster_work'); select pgmq.drop_queue('image_backfill');`).
 
 ---
 

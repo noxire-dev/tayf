@@ -57,13 +57,15 @@ describe("migration 024_pgmq_setup.sql (static)", () => {
     expect(sql).toMatch(/pgmq\.create\(\s*'image_backfill'\s*\)/i);
   });
 
-  it("creates a worker_checkpoint table for safety-net consumer modes", () => {
-    expect(sql).toMatch(/create\s+table[^;]*worker_checkpoint/i);
-    // Round-2 fix: articles.id is uuid, so the resume marker is a uuid column
-    // named last_seen_article_id (see 024_pgmq_setup.sql).
-    expect(sql).toMatch(/last_seen_article_id\s+uuid/i);
-    // Tripwire: the legacy bigint shape must never come back — a maintainer
-    // reverting to it would silently regress Round-1 F3 (uuid column rename).
+  it("does NOT create the worker_checkpoint table (Round-6 P1 removed it as dead schema)", () => {
+    // The original 024 created public.worker_checkpoint as a safety-net
+    // resume marker for a Vercel-cron fallback consumer that was never
+    // wired. Round-6 P1 removed the dead schema from this migration;
+    // migration 028 drops it on databases that previously applied the
+    // original 024. If a maintainer reintroduces the table here without
+    // wiring a real consumer, this assertion fails on the spot.
+    expect(sql).not.toMatch(/create\s+table[^;]*worker_checkpoint/i);
+    expect(sql).not.toMatch(/last_seen_article_id\s+uuid/i);
     expect(sql).not.toMatch(/last_seen_id\s+bigint/i);
   });
 
@@ -214,6 +216,25 @@ describe("migration 027_cluster_link_atomic.sql (static)", () => {
     expect(sql).toMatch(/revoke\s+all\s+on\s+function\s+public\.cluster_link_atomic[^;]+from\s+public/i);
     expect(sql).toMatch(/grant\s+execute\s+on\s+function\s+public\.cluster_link_atomic[^;]+to\s+service_role/i);
     expect(sql).not.toMatch(/grant\s+execute\s+on\s+function\s+public\.cluster_link_atomic[^;]+to\s+(anon|authenticated)/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration 028 — clean-drop of worker_checkpoint on databases that
+// applied the original 024 (Round-6 P1 follow-up).
+// ---------------------------------------------------------------------------
+
+describe("migration 028_drop_worker_checkpoint.sql (static)", () => {
+  let sql = "";
+  beforeAll(() => {
+    sql = read("028_drop_worker_checkpoint.sql");
+    expect(sql.length).toBeGreaterThan(0);
+  });
+
+  it("drops the trigger, the function, and the table — all IF EXISTS", () => {
+    expect(sql).toMatch(/drop\s+trigger\s+if\s+exists\s+worker_checkpoint_set_updated_at/i);
+    expect(sql).toMatch(/drop\s+function\s+if\s+exists\s+public\.worker_checkpoint_set_updated_at/i);
+    expect(sql).toMatch(/drop\s+table\s+if\s+exists\s+public\.worker_checkpoint/i);
   });
 });
 

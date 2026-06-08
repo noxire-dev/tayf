@@ -19,13 +19,12 @@
 --      pgmq.create() builds both the live (pgmq.q_<name>) and the archive
 --      (pgmq.a_<name>) tables and is a NOTICE-emitting no-op if the queue
 --      already exists, so this migration is safe to re-run.
---   3. A small worker_checkpoint table for safety-net consumer modes and
---      for observability ("last article id the consumer acked"). The
---      Edge Function consumers use pgmq's own visibility-timeout +
---      archive semantics for the happy path; this table only exists so a
---      Vercel-cron-based fallback consumer (R5 in ADR-001) could resume
---      where the Edge Function left off if pgmq had to be drained
---      manually.
+--   3. (deleted in Round-6 P1) The original migration also created a
+--      worker_checkpoint table as a safety-net resume marker for a
+--      Vercel-cron fallback consumer (R5 in ADR-001). Nothing wired it,
+--      so it shipped as dead schema — removed here. Migration 028 will
+--      drop the table on databases that already applied the original
+--      024 if any are deployed.
 --   4. A worker_metrics view that exposes the pgmq.metrics_all() output
 --      filtered to tayf's two queues. /api/health and /api/metrics read
 --      this view without needing the raw pgmq schema grants — which lets
@@ -37,9 +36,6 @@
 --     the Next.js API routes via createServerClient) can enqueue or
 --     dequeue. The trigger in 025 runs as table owner and bypasses this
 --     check by design.
---   - worker_checkpoint has RLS enabled with no policies — service_role
---     bypasses RLS, anon/authenticated are denied. This matches the
---     pattern set up in 017_rls_policies.sql.
 --   - worker_metrics is a view; service_role can read it. We do NOT
 --     grant it to anon/authenticated because queue depths are operational
 --     data, not public.
@@ -47,7 +43,6 @@
 -- Idempotency:
 --   - CREATE EXTENSION IF NOT EXISTS — safe.
 --   - pgmq.create — internal IF NOT EXISTS, safe.
---   - CREATE TABLE IF NOT EXISTS worker_checkpoint — safe.
 --   - REVOKE / GRANT are declarative — safe to re-run.
 --   - CREATE OR REPLACE VIEW worker_metrics — safe.
 
@@ -77,67 +72,24 @@ begin
 end
 $$;
 
--- 3. worker_checkpoint table — observability + safety-net resume marker.
+-- 3. (Removed) worker_checkpoint — Round-6 P1 cleanup.
 --
--- Schema note (Round-2 fix): articles.id is uuid (see 002_create_articles.sql),
--- so the resume marker must store a uuid, not a bigint. We rename the column
--- to last_seen_article_id for clarity and type it as uuid; it is nullable
--- because a freshly-installed consumer row legitimately has no prior ack.
--- If a timestamptz cursor is preferred later (ordering by articles.created_at
--- is the more natural pattern for "resume from where we left off"), add a
--- second column last_seen_created_at in a follow-up migration — both shapes
--- are forward-compatible with the safety-net (R5) consumer described in
--- ADR-001.
-create table if not exists public.worker_checkpoint (
-  name                  text        primary key,
-  last_seen_article_id  uuid,
-  updated_at            timestamptz not null default now()
-);
-
-comment on table public.worker_checkpoint is
-  'Resume markers for worker consumers. Each row is one logical consumer '
-  '(e.g. cluster-consumer, image-consumer); last_seen_article_id stores the '
-  'highest articles.id (uuid) the consumer has acked. Reserved for the '
-  'safety-net Vercel cron paths (R5 in ADR-001) so they can resume where a '
-  'drained Edge Function consumer left off. The happy-path Edge Function '
-  'consumers do not write here — they rely on pgmq archive semantics — so a '
-  'stale row here is not a fault. NOTE: /api/health does not currently read '
-  'this table; a future liveness wiring is tracked in the R3 follow-up.';
-
-comment on column public.worker_checkpoint.name is
-  'Logical consumer identifier (e.g. "cluster-consumer", "image-consumer").';
-comment on column public.worker_checkpoint.last_seen_article_id is
-  'Highest articles.id (uuid) the named consumer has acked. Nullable: a '
-  'freshly-installed consumer has no prior ack.';
-comment on column public.worker_checkpoint.updated_at is
-  'Wall-clock timestamp of the last checkpoint write. Liveness signal.';
-
-alter table public.worker_checkpoint enable row level security;
-
--- No policies — service_role bypasses RLS, anon/authenticated are denied.
--- Matches the pattern from 017_rls_policies.sql.
-
--- BEFORE UPDATE trigger: keep updated_at honest without callers having to
--- pass it explicitly. Recreating the function with `create or replace`
--- keeps this migration safely re-runnable; the trigger itself is dropped
--- and recreated for the same reason.
-create or replace function public.worker_checkpoint_set_updated_at()
-returns trigger
-language plpgsql
-as $$
-begin
-  new.updated_at := now();
-  return new;
-end;
-$$;
-
-drop trigger if exists worker_checkpoint_set_updated_at
-  on public.worker_checkpoint;
-
-create trigger worker_checkpoint_set_updated_at
-  before update on public.worker_checkpoint
-  for each row
-  execute function public.worker_checkpoint_set_updated_at();
+-- The original migration created a public.worker_checkpoint table as a
+-- safety-net resume marker for a Vercel-cron fallback consumer (the R5
+-- variant in ADR-001). That fallback path was never wired and no
+-- consumer ever wrote to the table — the happy-path Edge Function
+-- consumers rely entirely on pgmq archive semantics. Shipping a table
+-- whose documented semantics nothing implements is worse than no table,
+-- so the worker_checkpoint table, its updated_at trigger, and the
+-- supporting trigger function are removed here. If a fallback path is
+-- ever needed, a follow-up migration can reintroduce the table with
+-- the timestamptz cursor (last_seen_created_at) that the R3 follow-up
+-- in ADR-001 §6 suggested.
+--
+-- The migration is otherwise idempotent — applying it on an existing
+-- database that DID create worker_checkpoint will leave the table in
+-- place (no destructive change here). A separate cleanup migration can
+-- handle drop-if-exists once the branch has been deployed.
 
 -- 4. Lock pgmq surface area to service_role.
 -- Revoke first (idempotent), then grant. We revoke from PUBLIC as well to

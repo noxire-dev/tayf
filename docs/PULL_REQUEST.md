@@ -55,9 +55,11 @@ Full design rationale, alternatives, and consequences in [`adr/001-worker-stream
 - `supabase/functions/_shared/` — ported worker libraries (`rss/fetcher.ts`, `rss/normalize.ts`, `cluster/*`, `safe-fetch.ts`, `sentry.ts`, `supabase.ts`, `auth.ts`, `og-image.ts`).
 
 ### New migrations
-- `024_pgmq_setup.sql` — pgmq extension, `cluster_work` + `image_backfill` queues, `worker_checkpoint` table, `worker_metrics` view, service-role grants.
-- `025_worker_triggers.sql` — `AFTER INSERT` triggers; `SECURITY DEFINER` with locked `search_path`; idempotent (drops triggers before recreating); `GRANT EXECUTE ON pgmq.send` to the owner roles.
+- `024_pgmq_setup.sql` — pgmq extension, `cluster_work` + `image_backfill` queues, `worker_metrics` view, service-role grants. (Round-6 stripped the never-wired `worker_checkpoint` table from this migration; see 028.)
+- `025_worker_triggers.sql` — `AFTER INSERT` triggers; `SECURITY DEFINER` with empty `search_path` and fully `pg_catalog.`-qualified identifiers; idempotent (drops triggers before recreating); `GRANT EXECUTE ON pgmq.send` to the owner roles.
 - `026_unify_content_hash_v2.sql` — backfills the sha256-regime stragglers to sha1-of-shingles and installs `CHECK (length(content_hash) = 40)`.
+- `027_cluster_link_atomic.sql` — Round-6 P1 fix. `public.cluster_link_atomic` SECURITY DEFINER RPC serializes per-cluster `cluster_articles` INSERT + `clusters.article_count` recompute under `pg_advisory_xact_lock(hashtext(cluster_id::text))`, closing the race where two cluster-consumer invocations could leave `clusters.article_count` permanently under-counted.
+- `028_drop_worker_checkpoint.sql` — Round-6 P1 follow-up. Clean drop of `worker_checkpoint` table / trigger / function on databases that applied the original 024 (no-op via `DROP ... IF EXISTS` on fresh databases).
 
 ### Updated routes (Vercel side)
 - `/api/cron/headline` — bearer-gated (constant-time compare; fail-closed when `CRON_SECRET` is unset); 5-cluster batch ceiling; sanitised 500 envelope (no `err.message` leakage); rate limit and source-of-truth prompt for neutral Turkish headlines.
@@ -73,8 +75,9 @@ Full design rationale, alternatives, and consequences in [`adr/001-worker-stream
 - `scripts/lib/cluster/*.mjs` — the **golden-vector parity benchmark** that `tests/functions/_shared/cluster.test.ts` uses to assert the Deno port at `supabase/functions/_shared/cluster/*.ts` stays byte-equivalent. AGENTS.md is updated to make this explicit.
 
 ### Observability
-- `supabase/functions/_shared/sentry.ts` — graceful Sentry-Deno wrapper for every Edge Function; no-op when `SENTRY_DSN` is unset. Closes the 7-day-undetected-failure gap that the Next-side `@sentry/nextjs` SDK does not cover.
+- `supabase/functions/_shared/sentry.ts` — graceful Sentry-Deno wrapper for every Edge Function; no-op when `SENTRY_DSN` is unset. Closes the 7-day-undetected-failure gap that the Next-side `@sentry/nextjs` SDK does not cover. Round-6 added an explicit `captureException(functionName, err)` helper that every Edge Function's inner catch calls before returning the 500 envelope, so a swallowed throw cannot dodge Sentry (the `withSentry` wrapper only sees thrown errors).
 - `@sentry/nextjs` bumped to `^10.56` for Next 16 compatibility; sourcemaps API migrated from `hideSourceMaps` to `sourcemaps.disable`.
+- `/api/metrics` now exposes `clusters.neutralizedEligible`, `clusters.neutralized`, `clusters.neutralizedRatio`, and `clusters.oldestPendingNeutralAgeSec` so the on-call dashboard can page on headline-cron drift by age (the most actionable single signal) rather than waiting for the ratio to decay.
 
 ### Test infrastructure
 - New: `tests/functions/{ingest,cluster-consumer,image-consumer}.test.ts`, `tests/functions/_shared/{safe-fetch,cluster}.test.ts`, `tests/migrations/024-026.test.ts`.
@@ -104,10 +107,14 @@ Full design rationale, alternatives, and consequences in [`adr/001-worker-stream
 
 - **Service-role bearer required** on every Edge Function handler (`requireServiceRoleBearer`).
 - **Fail-closed bearer check** on `/api/cron/headline` and `/api/metrics` when `CRON_SECRET` is unset — they return 503, never 200.
-- **SSRF guard** on every outbound HTTP from the Deno side via `safe-fetch.ts` (DNS resolution + private-range allowlist).
-- **`SECURITY DEFINER` triggers** with locked `search_path`; pgmq function access revoked from `anon`/`authenticated`; explicit `GRANT EXECUTE` to the function-owner roles.
+- **SSRF guard** on every outbound HTTP from the Deno side via `safe-fetch.ts`:
+  - DNS resolution + private-range allowlist (RFC1918, loopback, link-local, ULA, CGNAT, benchmark, TEST-NETs, multicast, future-use, IPv6 documentation, IPv6 link-local, IPv6 multicast, IPv6 ULA).
+  - **IPv4-mapped IPv6 unwrapping** so `http://[::ffff:169.254.169.254]/` cannot dodge the IPv4 list and reach the EC2 IMDS endpoint (Round-6 P0 close).
+  - **DNS-pinning for plain HTTP** so a rebinding attacker who serves a public IP to our check and a private IP to `fetch` cannot bypass the allowlist (Round-6 P1 close). HTTPS keeps the hostname for SNI/TLS verification.
+- **`SECURITY DEFINER` triggers** with **empty `search_path`** and fully `pg_catalog.`-qualified identifiers (Round-6 P1 close — the original `public, pgmq, pg_temp` setting allowed a session role with CREATE on `pg_temp` to shadow unqualified calls inside the function body); pgmq function access revoked from `anon`/`authenticated`; explicit `GRANT EXECUTE` to the function-owner roles.
+- **Per-cluster advisory lock** in `cluster_link_atomic` (migration 027) serializes concurrent `cluster_articles` INSERT + `clusters.article_count` recompute against the same cluster, eliminating both the under-count race and the half-applied-write trap (Round-6 P1 close).
 - **Anonymous rate limit** on `/api/health`'s public envelope (30 capacity, 1/s refill).
-- **No `err.message` in 500 response bodies** — raw errors route to Sentry / Edge Function logs with a `request_id`.
+- **No `err.message` in 500 response bodies** — raw errors route to Sentry / Edge Function logs with a `request_id`. Edge Function inner-catches explicitly call `captureException` so a swallowed throw never goes unpaged (Round-6 P1 close).
 - **No AI/Claude/Anthropic attribution** anywhere in the diff (commits, code, comments, branch name). The `ANTHROPIC_API_KEY` env var is the patient-LLM product key, not attribution; it was already in `.env.example` before this PR.
 
 ## Operator cutover
@@ -131,8 +138,12 @@ The full checklist is [`migration-guide.md`](migration-guide.md); the ordered TL
 ## Verification
 
 - `npx tsc --noEmit` — clean.
-- `npx vitest run` — 18 test files, 294 passed + 3 intentional `describe.runIf(LIVE)` skips.
-- Final QA Round 6 (10-dimension parallel review + 3-lens adversarial verification + completeness critic + synthesis) — see `qa/round6/FINAL_QA_REPORT_ROUND6.md`.
+- `npx vitest run` — 18 test files, 312 passed + 3 intentional `describe.runIf(LIVE)` skips (the live tier runs only when `SUPABASE_LOCAL_URL` is set; CI / clean dev boxes skip it).
+- Final QA Round 6 ran in two parallel Opus-pinned workflows covering security/correctness and operability/PR-readiness. Reports under `qa/round6/`. The audit surfaced 1 P0 (SSRF IPv4-mapped IPv6 bypass) and 6 P1s (DNS-rebinding TOCTOU, SECURITY DEFINER `pg_temp` shadow, two cluster-write race shapes, Edge Function `captureException` gap, `/api/metrics` missing headline-cron drift signals, `worker_checkpoint` dead schema). All P0/P1 findings are closed by the commits between `aa1fc9e` and HEAD; the corresponding regression tests are in `tests/functions/_shared/safe-fetch.test.ts` and `tests/migrations/024-028.test.ts`. Remaining audit items are P2/P3 follow-ups documented in the report files.
+
+## Commit history note
+
+The 50+ commits on this branch are organized by work-packet, not by perfect linear narrative. Some files (notably the migration set, `safe-fetch.ts`, and parts of the test suite) carry multiple commits because the design surfaced through iterative QA rounds — each fix is its own atomic commit so the audit trail of what-changed-why is preserved. A reviewer who wants the abridged narrative can read this PR body and the per-Round QA reports in `qa/round*/`; a reviewer who wants the full audit story can `git log --oneline origin/main..HEAD` and follow the commit message references back to the round that surfaced each finding. No commits mix unrelated work.
 
 ## Out of scope
 
