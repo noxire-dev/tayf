@@ -45,6 +45,30 @@ interface Metrics {
     multiArticle: number;
     blindspots: number;
     avgArticlesPerCluster: number;
+    /**
+     * Multi-article clusters eligible for the neutral-headline rewrite
+     * (article_count >= 3 per the /api/cron/headline batch query). On-call
+     * pages on the ratio vs `neutralized` below; if drift exceeds a
+     * threshold, headline cron has stalled.
+     */
+    neutralizedEligible: number;
+    /** Clusters where `title_tr_neutral` has already been written. */
+    neutralized: number;
+    /**
+     * Ratio of neutralized clusters to eligible clusters, rounded to two
+     * decimals. 1.0 means headline cron is fully caught up; values below
+     * 0.9 typically indicate cron drift.
+     */
+    neutralizedRatio: number;
+    /**
+     * Age in seconds of the oldest eligible cluster that has NOT been
+     * neutralized yet. The most actionable single signal for headline-
+     * cron health — a value rising past ~600 means the cron has skipped
+     * at least one batch. Null when no pending neutralization work
+     * exists (or when the row has no first_published timestamp, which is
+     * itself an upstream bug).
+     */
+    oldestPendingNeutralAgeSec: number | null;
   };
   sources: {
     total: number;
@@ -90,6 +114,20 @@ export const GET = withApiErrors(async (request: Request) => {
 
   const supabase = createServerClient();
 
+  // Round-6 P1: the headline-cron health signals — `clustersNeutralizedEligible`,
+  // `clustersNeutralized`, and `clustersOldestPendingNeutral` — are the
+  // queries that make this endpoint actionable for the on-call rotation. The
+  // ratio + age make headline-cron stalls page on age rather than on the
+  // ratio alone (the ratio takes hours to drift visibly).
+  const oldestPendingNeutralQuery = supabase
+    .from("clusters")
+    .select("first_published")
+    .is("title_neutral_at", null)
+    .gte("article_count", 3)
+    .order("first_published", { ascending: true, nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+
   // Run all the counts in parallel.
   const queries = [
     { name: "articlesTotal", q: supabase.from("articles").select("*", { count: "exact", head: true }) },
@@ -100,10 +138,15 @@ export const GET = withApiErrors(async (request: Request) => {
     { name: "clustersTotal", q: supabase.from("clusters").select("*", { count: "exact", head: true }) },
     { name: "clustersMulti", q: supabase.from("clusters").select("*", { count: "exact", head: true }).gte("article_count", 2) },
     { name: "clustersBlindspots", q: supabase.from("clusters").select("*", { count: "exact", head: true }).eq("is_blindspot", true) },
+    { name: "clustersNeutralizedEligible", q: supabase.from("clusters").select("*", { count: "exact", head: true }).gte("article_count", 3) },
+    { name: "clustersNeutralized", q: supabase.from("clusters").select("*", { count: "exact", head: true }).gte("article_count", 3).not("title_neutral_at", "is", null) },
     { name: "sourcesTotal", q: supabase.from("sources").select("*", { count: "exact", head: true }) },
     { name: "sourcesActive", q: supabase.from("sources").select("*", { count: "exact", head: true }).eq("active", true) },
   ];
-  const results = await Promise.all(queries.map((entry) => entry.q));
+  const [results, oldestPendingNeutralRes] = await Promise.all([
+    Promise.all(queries.map((entry) => entry.q)),
+    oldestPendingNeutralQuery,
+  ]);
 
   // Surface any per-query Supabase errors instead of silently dropping them
   // into `?? 0` — the previous shape would flatline a metric on RPC failure
@@ -122,7 +165,7 @@ export const GET = withApiErrors(async (request: Request) => {
   }
 
   // results[i] is guaranteed defined: the `queries` array is a literal of
-  // exactly 10 entries, so Promise.all returns exactly 10 results. The non-
+  // exactly 12 entries, so Promise.all returns exactly 12 results. The non-
   // null assertions below mirror that invariant for the strict tsconfig
   // (noUncheckedIndexedAccess); the alternative is a tuple type, which is
   // noisier for the same guarantee.
@@ -134,11 +177,35 @@ export const GET = withApiErrors(async (request: Request) => {
   const clustersTotal = results[5]!;
   const clustersMulti = results[6]!;
   const clustersBlindspots = results[7]!;
-  const sourcesTotal = results[8]!;
-  const sourcesActive = results[9]!;
+  const clustersNeutralizedEligible = results[8]!;
+  const clustersNeutralized = results[9]!;
+  const sourcesTotal = results[10]!;
+  const sourcesActive = results[11]!;
+
+  if (oldestPendingNeutralRes.error) {
+    console.error(
+      "[metrics] supabase oldest-pending-neutral query failure",
+      oldestPendingNeutralRes.error,
+    );
+    return apiError(503, "metrics query failed", {
+      code: "METRICS_QUERY_FAILED",
+      details: { queries: ["oldestPendingNeutral"] },
+    });
+  }
 
   const clustersCount = clustersTotal.count ?? 0;
   const totalArticles = articlesTotal.count ?? 0;
+  const eligibleCount = clustersNeutralizedEligible.count ?? 0;
+  const neutralizedCount = clustersNeutralized.count ?? 0;
+  const oldestPendingFirstPublished =
+    (oldestPendingNeutralRes.data as { first_published: string | null } | null)
+      ?.first_published ?? null;
+  const oldestPendingAgeSec = oldestPendingFirstPublished
+    ? Math.max(
+        0,
+        Math.floor((Date.now() - new Date(oldestPendingFirstPublished).getTime()) / 1000),
+      )
+    : null;
 
   const body: Metrics = {
     timestamp: new Date().toISOString(),
@@ -154,6 +221,12 @@ export const GET = withApiErrors(async (request: Request) => {
       multiArticle: clustersMulti.count ?? 0,
       blindspots: clustersBlindspots.count ?? 0,
       avgArticlesPerCluster: clustersCount > 0 ? Math.round((totalArticles / clustersCount) * 100) / 100 : 0,
+      neutralizedEligible: eligibleCount,
+      neutralized: neutralizedCount,
+      neutralizedRatio: eligibleCount > 0
+        ? Math.round((neutralizedCount / eligibleCount) * 100) / 100
+        : 1,
+      oldestPendingNeutralAgeSec: oldestPendingAgeSec,
     },
     sources: {
       total: sourcesTotal.count ?? 0,

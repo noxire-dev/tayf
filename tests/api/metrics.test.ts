@@ -37,22 +37,31 @@ vi.mock("next/server", async (importOriginal) => {
 
 interface CountResponse {
   count: number | null;
+  // Round-6 P1 added a maybeSingle() query for the oldest pending neutral
+  // cluster — that surface returns `data`, not `count`. Keep `data`
+  // optional on the same record so we can keep the single fake.
+  data?: { first_published: string | null } | null;
   error: { message: string } | null;
 }
 
 // Default counts, in the order the route issues them. Matches the
 // Promise.all in src/app/api/metrics/route.ts.
 const DEFAULT_COUNTS: CountResponse[] = [
-  { count: 100, error: null }, // articlesTotal
-  { count: 20, error: null }, // articlesLast24h
-  { count: 5, error: null }, // articlesLastHour
-  { count: 3, error: null }, // politicsNullImage
-  { count: 77, error: null }, // articlesWithImage
-  { count: 40, error: null }, // clustersTotal
-  { count: 12, error: null }, // clustersMulti
-  { count: 2, error: null }, // clustersBlindspots
-  { count: 8, error: null }, // sourcesTotal
-  { count: 7, error: null }, // sourcesActive
+  { count: 100, error: null }, // 0  articlesTotal
+  { count: 20, error: null }, // 1  articlesLast24h
+  { count: 5, error: null }, // 2  articlesLastHour
+  { count: 3, error: null }, // 3  politicsNullImage
+  { count: 77, error: null }, // 4  articlesWithImage
+  { count: 40, error: null }, // 5  clustersTotal
+  { count: 12, error: null }, // 6  clustersMulti
+  { count: 2, error: null }, // 7  clustersBlindspots
+  { count: 10, error: null }, // 8  clustersNeutralizedEligible
+  { count: 7, error: null }, // 9  clustersNeutralized
+  { count: 8, error: null }, // 10 sourcesTotal
+  { count: 7, error: null }, // 11 sourcesActive
+  // 12 oldestPendingNeutral — null data means "no pending row"; the
+  // route renders this as `oldestPendingNeutralAgeSec: null`.
+  { count: null, data: null, error: null },
 ];
 
 let currentCounts: CountResponse[] = [...DEFAULT_COUNTS];
@@ -172,6 +181,14 @@ describe("GET /api/metrics", () => {
       blindspots: 2,
       // 100 / 40 = 2.5 (rounded to 2 decimal places)
       avgArticlesPerCluster: 2.5,
+      neutralizedEligible: 10,
+      neutralized: 7,
+      // 7 / 10 = 0.70 — well below the 0.9 page threshold the docs
+      // call out as the headline-cron drift signal.
+      neutralizedRatio: 0.7,
+      // null because the fake's index-12 row returns data: null,
+      // meaning "no pending row at all".
+      oldestPendingNeutralAgeSec: null,
     });
 
     expect(body.sources).toEqual({
