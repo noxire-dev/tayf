@@ -1,8 +1,8 @@
 // supabase/functions/_shared/og-image.ts
 //
 // SSRF-safe og:image extractor for the image-backfill Edge Function. Ported
-// from src/lib/rss/og-image.ts + scripts/lib/shared/og-image.mjs with the
-// audit T3 P1-5 SSRF guard wired in: every outbound HTTP fetch goes through
+// from the legacy Node helpers with the audit T3 P1-5 SSRF guard wired in:
+// every outbound HTTP fetch goes through
 // `safeFetch` (DNS-resolve + RFC1918 / 169.254 / loopback / ULA block +
 // manual redirect handling + 50 KB body cap).
 //

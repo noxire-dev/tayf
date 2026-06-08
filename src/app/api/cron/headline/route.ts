@@ -122,9 +122,7 @@ interface ClusterArticleRow {
  * Ask the configured LLM for a neutral, factual aggregator headline for a
  * cluster. This route is the sole caller and source-of-truth for the
  * neutral-headline prompt since the worker-stream refactor retired the
- * tmux-based headline runner. The legacy reference implementation in
- * `scripts/lib/shared/llm-headlines.mjs` is retained only as a historical
- * comparator; do NOT call it from the live pipeline.
+ * tmux-based headline runner.
  */
 async function rewriteClusterHeadline(input: {
   member_titles: string[];
