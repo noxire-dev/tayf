@@ -15,7 +15,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Match the project's declared engines and README ("Node.js 24+").
+          # Next 16 + React 19 require >=18.18 to run, but the worker-stream
+          # codebase has only been smoke-tested on the Node 24 family. Pin
+          # the major to keep CI honest with local dev.
+          node-version: 24
           cache: npm
 
       - run: npm ci
