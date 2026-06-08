@@ -48,3 +48,13 @@ skills.md
 
 # supabase local
 supabase/.temp/
+
+# local session noise — Windows stack dumps, baseline logs, transcripts.
+bash.exe.stackdump
+.tsc-baseline.log
+.vitest-baseline.log
+2026-*-from-my-github*
+qa/
+
+# Per-directory agent-config files left by upstream tooling.
+**/CLAUDE.md
