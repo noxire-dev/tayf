@@ -627,16 +627,19 @@ async function addArticleToCluster(
     }
   }
 
-  const linkRes = await supabase.from("cluster_articles").insert({
-    cluster_id: clusterId,
-    article_id: article.id,
-  });
-  if (linkRes.error && !/duplicate/i.test(linkRes.error.message)) {
-    throw new Error(`addArticle link: ${linkRes.error.message}`);
-  }
-
-  markClusterHasSource(clusterId, article.source_id);
-
+  // Round-6 P1 fix: read the existing member set FIRST so we can compute
+  // the aggregate (bias distribution, blindspot, timestamps) against a
+  // snapshot that INCLUDES the about-to-be-inserted article. The RPC
+  // below then takes a per-cluster advisory lock, performs the INSERT
+  // (idempotent via the (cluster_id, article_id) primary key), recounts
+  // under the lock, and writes article_count + the aggregates we passed
+  // in. This eliminates two races the previous shape carried:
+  //   * Two consumers both INSERTing for the same cluster and both
+  //     UPDATEing clusters.article_count from the pre-INSERT count,
+  //     leaving the row permanently under-counted.
+  //   * INSERT succeeding then UPDATE failing, leaving clusters stale
+  //     while the (cluster_id, article_id) primary key blocks every
+  //     retry from re-firing the recompute.
   const memberRes = await supabase
     .from("cluster_articles")
     .select("article_id")
@@ -644,15 +647,19 @@ async function addArticleToCluster(
   if (memberRes.error) {
     throw new Error(`addArticle members: ${memberRes.error.message}`);
   }
-  const memberIds = ((memberRes.data ?? []) as Array<{ article_id: string }>).map(
-    (r) => r.article_id,
+  const memberIds = new Set<string>(
+    ((memberRes.data ?? []) as Array<{ article_id: string }>).map(
+      (r) => r.article_id,
+    ),
   );
-  if (memberIds.length === 0) return { skipped: false };
+  // Include the about-to-be-inserted article so the aggregate matches
+  // the count the RPC will compute under the lock.
+  memberIds.add(article.id);
 
   const artRes = await supabase
     .from("articles")
     .select("id, source_id, published_at")
-    .in("id", memberIds);
+    .in("id", [...memberIds]);
   if (artRes.error) {
     throw new Error(`addArticle articles: ${artRes.error.message}`);
   }
@@ -674,18 +681,20 @@ async function addArticleToCluster(
     ? new Date(Math.max(...timestamps)).toISOString()
     : new Date().toISOString();
 
-  const updateRes = await supabase
-    .from("clusters")
-    .update({
-      article_count: arts.length,
-      bias_distribution: dist,
-      is_blindspot,
-      blindspot_side,
-      first_published: firstPublishedIso,
-      updated_at: lastPublishedIso,
-    })
-    .eq("id", clusterId);
-  if (updateRes.error) throw new Error(`addArticle update: ${updateRes.error.message}`);
+  const rpcRes = await supabase.rpc("cluster_link_atomic", {
+    p_cluster_id: clusterId,
+    p_article_id: article.id,
+    p_bias_distribution: dist,
+    p_is_blindspot: is_blindspot,
+    p_blindspot_side: blindspot_side,
+    p_first_published: firstPublishedIso,
+    p_last_published: lastPublishedIso,
+  });
+  if (rpcRes.error) {
+    throw new Error(`addArticle rpc: ${rpcRes.error.message}`);
+  }
+
+  markClusterHasSource(clusterId, article.source_id);
   return { skipped: false };
 }
 
@@ -732,19 +741,13 @@ async function processArticle(articleId: string): Promise<"matched" | "created" 
     return "not-politics";
   }
 
-  // Idempotency: if this article already has a cluster_articles row, treat
-  // the message as a no-op. Re-processing must not produce a second link.
-  const existing = await supabase
-    .from("cluster_articles")
-    .select("cluster_id")
-    .eq("article_id", raw.id)
-    .limit(1);
-  if (existing.error) {
-    throw new Error(`processArticle existing-check: ${existing.error.message}`);
-  }
-  if ((existing.data ?? []).length > 0) {
-    return "skipped";
-  }
+  // Idempotency is enforced inside `cluster_link_atomic` via the
+  // (cluster_id, article_id) primary key + per-cluster advisory lock:
+  // a duplicate INSERT is a no-op but the recompute still runs, which
+  // is the Round-6 P1 fix for "half-applied cluster writes" (link
+  // committed, clusters UPDATE failed, idempotency check then locked
+  // the row in its stale state forever). We deliberately do NOT
+  // short-circuit on a pre-existing cluster_articles row anymore.
 
   const article = enrichArticleInMemory(raw);
   await persistEnrichment(article);

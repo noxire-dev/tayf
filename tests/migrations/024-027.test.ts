@@ -161,6 +161,63 @@ describe("migration 026_unify_content_hash_v2.sql (static)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Migration 027 — atomic cluster_articles link + clusters recompute under
+// a per-cluster advisory lock. Round-6 P1 fix for the concurrent
+// cluster-write race that left clusters.article_count under-counted when
+// two consumers added different articles to the same cluster in parallel.
+// ---------------------------------------------------------------------------
+
+describe("migration 027_cluster_link_atomic.sql (static)", () => {
+  let sql = "";
+  beforeAll(() => {
+    sql = read("027_cluster_link_atomic.sql");
+    expect(sql.length).toBeGreaterThan(0);
+  });
+
+  it("defines public.cluster_link_atomic(...) as SECURITY DEFINER", () => {
+    expect(sql).toMatch(/create\s+function\s+public\.cluster_link_atomic/i);
+    expect(sql).toMatch(/security\s+definer/i);
+  });
+
+  it("locks the function to an empty search_path with pg_catalog-qualified calls", () => {
+    // Round-6 P1 tripwire (mirrors the migration 025 lock): empty
+    // search_path + schema-qualified identifiers so pg_temp shadowing
+    // cannot reach the SECURITY DEFINER body.
+    expect(sql).not.toMatch(/set\s+search_path[^\n]*pg_temp/i);
+    expect(sql).toMatch(/set\s+search_path\s*=\s*''/i);
+    expect(sql).toMatch(/pg_catalog\.pg_advisory_xact_lock/);
+    expect(sql).toMatch(/pg_catalog\.hashtext/);
+    expect(sql).toMatch(/pg_catalog\.count/);
+  });
+
+  it("uses pg_advisory_xact_lock for per-cluster serialization", () => {
+    expect(sql).toMatch(/pg_advisory_xact_lock\(\s*pg_catalog\.hashtext/i);
+  });
+
+  it("INSERTs into cluster_articles with ON CONFLICT DO NOTHING", () => {
+    expect(sql).toMatch(/insert\s+into\s+public\.cluster_articles/i);
+    expect(sql).toMatch(/on\s+conflict\s+do\s+nothing/i);
+  });
+
+  it("recomputes article_count under the lock before UPDATEing clusters", () => {
+    // The COUNT(*) must be inside the function body BEFORE the UPDATE;
+    // a naive implementation that passed an externally-computed count
+    // would re-introduce the race.
+    expect(sql).toMatch(/select\s+pg_catalog\.count\(\*\)\s+into\s+v_count[\s\S]*from\s+public\.cluster_articles/i);
+    const updateIdx = sql.search(/update\s+public\.clusters/i);
+    const countIdx = sql.search(/select\s+pg_catalog\.count\(\*\)\s+into\s+v_count/i);
+    expect(countIdx).toBeGreaterThan(-1);
+    expect(updateIdx).toBeGreaterThan(countIdx);
+  });
+
+  it("grants EXECUTE to service_role only (no anon / authenticated / public)", () => {
+    expect(sql).toMatch(/revoke\s+all\s+on\s+function\s+public\.cluster_link_atomic[^;]+from\s+public/i);
+    expect(sql).toMatch(/grant\s+execute\s+on\s+function\s+public\.cluster_link_atomic[^;]+to\s+service_role/i);
+    expect(sql).not.toMatch(/grant\s+execute\s+on\s+function\s+public\.cluster_link_atomic[^;]+to\s+(anon|authenticated)/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Live integration checks — opt-in via SUPABASE_LOCAL_URL.
 //
 // These speak Postgres directly. We don't pull in a Supabase JS client here
