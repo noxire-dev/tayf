@@ -23,8 +23,8 @@ import type { VercelConfig } from "@vercel/config/v1";
  *     batch. Fail-closed against a missing `CRON_SECRET`. See
  *     `src/app/api/cron/headline/route.ts`.
  *
- * Full architecture in
- * `tayf-refactor/architecture/ADR-001-worker-stream-system.md`.
+ * Full architecture in `docs/adr/001-worker-stream-system.md`; operator
+ * cutover steps in `docs/migration-guide.md`.
  */
 const config: VercelConfig = {
   crons: [

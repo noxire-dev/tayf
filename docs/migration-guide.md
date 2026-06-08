@@ -2,7 +2,7 @@
 
 Transitioning a deployed tayf instance from the legacy worker pattern (the per-worker `scripts/{rss,cluster,image,headline}-worker.mjs` processes orchestrated under tmux) to the new Vercel-cron + Supabase-Edge-Functions + pgmq stream system.
 
-Architectural overview lives in [`tayf-refactor/architecture/ADR-001-worker-stream-system.md`](../tayf-refactor/architecture/ADR-001-worker-stream-system.md). Read it first if you need the *why*. This document is the *how*: an ordered checklist for a one-operator deployment.
+Architectural overview lives in [`adr/001-worker-stream-system.md`](adr/001-worker-stream-system.md). Read it first if you need the *why*. This document is the *how*: an ordered checklist for a one-operator deployment.
 
 > **Scope:** production Supabase project + production Vercel project. Local dev parity instructions are at the end. The user owns the merge of `refactor/worker-stream-system` to `main`; nothing in this guide does that.
 

@@ -1,7 +1,7 @@
 -- 024_pgmq_setup.sql
 --
 -- Stand up the pgmq-based worker stream system (see
--- architecture/ADR-001-worker-stream-system.md). This migration owns ONLY
+-- docs/adr/001-worker-stream-system.md). This migration owns ONLY
 -- the queue plumbing and access control; the per-table INSERT/UPDATE
 -- triggers that enqueue work live in 025_worker_triggers.sql and the
 -- content_hash unification in 026_unify_content_hash_v2.sql.

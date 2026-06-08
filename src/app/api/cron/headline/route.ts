@@ -24,8 +24,8 @@ if (process.env.NODE_ENV === "production" && !process.env.CRON_SECRET) {
 /**
  * Vercel cron — neutral-headline rewriter.
  *
- * Replaces the long-running `scripts/headline-worker.mjs` tmux process with a
- * stateless serverless invocation that runs every 5 minutes (see `vercel.ts`).
+ * Replaces the long-running tmux headline-worker process with a stateless
+ * serverless invocation that runs every 5 minutes (see `vercel.ts`).
  *
  * BEHAVIOUR
  * ---------
@@ -120,9 +120,11 @@ interface ClusterArticleRow {
 
 /**
  * Ask the configured LLM for a neutral, factual aggregator headline for a
- * cluster. Ports the prompt + parsing logic from
- * `scripts/lib/shared/llm-headlines.mjs` so the tmux worker and this cron
- * emit identical output for the same input.
+ * cluster. This route is the sole caller and source-of-truth for the
+ * neutral-headline prompt since the worker-stream refactor retired the
+ * tmux-based headline runner. The legacy reference implementation in
+ * `scripts/lib/shared/llm-headlines.mjs` is retained only as a historical
+ * comparator; do NOT call it from the live pipeline.
  */
 async function rewriteClusterHeadline(input: {
   member_titles: string[];

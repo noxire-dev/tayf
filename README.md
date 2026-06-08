@@ -44,7 +44,7 @@ Tayf no longer runs long-lived Node workers. The new pipeline is an event-driven
                                               Next.js 16 App Router (/, /cluster/[id], /admin)
 ```
 
-Full design rationale, alternatives considered, and migration plan: [`tayf-refactor/architecture/ADR-001-worker-stream-system.md`](../tayf-refactor/architecture/ADR-001-worker-stream-system.md).
+Full design rationale, alternatives considered, and migration plan: [`docs/adr/001-worker-stream-system.md`](docs/adr/001-worker-stream-system.md). Operator cutover steps: [`docs/migration-guide.md`](docs/migration-guide.md).
 
 ## Local development
 
