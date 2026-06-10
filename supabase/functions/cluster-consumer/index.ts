@@ -49,7 +49,21 @@ import {
 // ---------------------------------------------------------------------------
 
 const QUEUE_NAME = "cluster_work";
-const BATCH_SIZE = 50;
+// Messages processed per invocation. Kept small because each article is
+// scored against the full cluster context (a per-article TF-IDF build), so
+// large batches push a single invocation past the Edge compute limit. The
+// cluster-drain pg_cron fires every minute, so a small batch still clears
+// the backlog quickly and keeps steady state.
+const BATCH_SIZE = 2;
+// Upper bound on clusters held in the in-memory rolling context — see
+// loadClusterContext. The context build fingerprints seed+latest of every
+// included cluster on each cold invocation, and that per-invocation CPU is
+// what trips the Edge Function compute limit (546): ~800 fingerprints at
+// cap 400 exceeds it, ~300 at cap 150 stays under with margin. This is a
+// stopgap — the durable fix is to persist the MinHash signature at ingest
+// so the consumer reads instead of recomputing, which would let the full
+// 48h window back in. Tracked as a follow-up.
+const CONTEXT_CLUSTER_CAP = 60;
 const VT_SECONDS = 60;                      // visibility timeout per message
 // Poison contract (shared with image-consumer): a message is permanently
 // failed once read_ct EXCEEDS this — i.e. on its 4th read.
@@ -245,23 +259,27 @@ async function loadClusterContext(): Promise<ClusterContext> {
     Date.now() - TIME_WINDOW_HOURS * 60 * 60 * 1000,
   ).toISOString();
 
+  // Bound the in-memory context to the most-recently-updated clusters. The
+  // unbounded load (every cluster touched in the 48h window, plus all their
+  // member articles + per-article TF-IDF) blew the Edge Function compute
+  // limit at production scale (72k clusters, tens of thousands inside 48h →
+  // 546 WORKER_RESOURCE_LIMIT). The newest clusters are the only realistic
+  // match targets for an incoming article — a story that stopped getting
+  // coverage is not one a fresh article will join — so capping to the top
+  // CONTEXT_CLUSTER_CAP by updated_at keeps clustering quality while making
+  // memory deterministic.
   const clusters: ClusterRow[] = [];
   {
-    const PAGE = 1000;
-    for (let offset = 0; offset < 100_000; offset += PAGE) {
-      const res = await supabase
-        .from("clusters")
-        .select("id, title_tr, first_published, updated_at, article_count")
-        .gte("updated_at", cutoffIso)
-        .order("updated_at", { ascending: false })
-        .range(offset, offset + PAGE - 1);
-      if (res.error) {
-        throw new Error(`loadClusterContext clusters: ${res.error.message}`);
-      }
-      const page = (res.data ?? []) as ClusterRow[];
-      clusters.push(...page);
-      if (page.length < PAGE) break;
+    const res = await supabase
+      .from("clusters")
+      .select("id, title_tr, first_published, updated_at, article_count")
+      .gte("updated_at", cutoffIso)
+      .order("updated_at", { ascending: false })
+      .limit(CONTEXT_CLUSTER_CAP);
+    if (res.error) {
+      throw new Error(`loadClusterContext clusters: ${res.error.message}`);
     }
+    clusters.push(...((res.data ?? []) as ClusterRow[]));
   }
 
   const emptyCtx: ClusterContext = {
