@@ -1,9 +1,29 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
+// next/server mock.
+//
+// The metrics route awaits `connection()` (directly or via shared helpers) so
+// Next.js 16's cache-components prerender doesn't choke on `request.headers`.
+// Outside a Next.js request scope (i.e. here in vitest) the real
+// `connection()` throws "called outside a request scope" — resolve it to a
+// no-op so the handler can run end-to-end and we exercise the real count
+// envelope instead of a 500-for-wrong-reason. Everything else from
+// `next/server` (NextResponse, etc.) passes through untouched via
+// `importOriginal`.
+// ---------------------------------------------------------------------------
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return {
+    ...actual,
+    connection: async () => {},
+  };
+});
+
+// ---------------------------------------------------------------------------
 // Supabase mock plumbing for /api/metrics.
 //
-// The route issues Promise.all over ten count queries. Each one starts with
+// The route issues Promise.all over thirteen count queries. Each one starts with
 // `supabase.from("<table>").select("*", { count: "exact", head: true })` and
 // then chains zero or more filter predicates (.gte / .is / .in / .not / .eq).
 // Every chain is thenable (the route `await`s on them directly via Promise.all)
@@ -17,22 +37,35 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 interface CountResponse {
   count: number | null;
+  // Round-6 P1 added a maybeSingle() query for the oldest pending neutral
+  // cluster — that surface returns `data`, not `count`. Keep `data`
+  // optional on the same record so we can keep the single fake.
+  data?: { first_published: string | null } | null;
   error: { message: string } | null;
 }
 
 // Default counts, in the order the route issues them. Matches the
 // Promise.all in src/app/api/metrics/route.ts.
 const DEFAULT_COUNTS: CountResponse[] = [
-  { count: 100, error: null }, // articlesTotal
-  { count: 20, error: null }, // articlesLast24h
-  { count: 5, error: null }, // articlesLastHour
-  { count: 3, error: null }, // politicsNullImage
-  { count: 77, error: null }, // articlesWithImage
-  { count: 40, error: null }, // clustersTotal
-  { count: 12, error: null }, // clustersMulti
-  { count: 2, error: null }, // clustersBlindspots
-  { count: 8, error: null }, // sourcesTotal
-  { count: 7, error: null }, // sourcesActive
+  { count: 100, error: null }, // 0  articlesTotal
+  { count: 20, error: null }, // 1  articlesLast24h
+  { count: 5, error: null }, // 2  articlesLastHour
+  { count: 3, error: null }, // 3  politicsNullImage
+  // politicsTotal is deliberately distinct from every other default so a
+  // query-order swap (e.g. with politicsNullImage above) skews the ratio
+  // and fails the shape assertion loudly instead of passing by luck.
+  { count: 16, error: null }, // 4  politicsTotal
+  { count: 77, error: null }, // 5  articlesWithImage
+  { count: 40, error: null }, // 6  clustersTotal
+  { count: 12, error: null }, // 7  clustersMulti
+  { count: 2, error: null }, // 8  clustersBlindspots
+  { count: 10, error: null }, // 9  clustersNeutralizedEligible
+  { count: 7, error: null }, // 10 clustersNeutralized
+  { count: 8, error: null }, // 11 sourcesTotal
+  { count: 7, error: null }, // 12 sourcesActive
+  // 13 oldestPendingNeutral — null data means "no pending row"; the
+  // route renders this as `oldestPendingNeutralAgeSec: null`.
+  { count: null, data: null, error: null },
 ];
 
 let currentCounts: CountResponse[] = [...DEFAULT_COUNTS];
@@ -91,16 +124,25 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 const ORIGINAL_ENV = { ...process.env };
+const TEST_CRON_SECRET = "test-cron-secret-for-metrics-route";
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  // The metrics route fail-closes on a missing CRON_SECRET (503) and
+  // 401s any caller without a matching Bearer header. Tests default to
+  // a bearer-authed Request so they exercise the count-aggregation path.
+  process.env.CRON_SECRET = TEST_CRON_SECRET;
   currentCounts = [...DEFAULT_COUNTS];
   callIndex = 0;
 });
 
 afterEach(() => {
-  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
+  for (const k of [
+    "NEXT_PUBLIC_SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "CRON_SECRET",
+  ]) {
     if (k in ORIGINAL_ENV) {
       process.env[k] = ORIGINAL_ENV[k] as string;
     } else {
@@ -110,9 +152,14 @@ afterEach(() => {
   vi.resetModules();
 });
 
-async function callGet() {
+async function callGet(request?: Request) {
   const mod = await import("@/app/api/metrics/route");
-  const res = await mod.GET();
+  const authedRequest =
+    request ??
+    new Request("http://localhost/api/metrics", {
+      headers: { Authorization: `Bearer ${TEST_CRON_SECRET}` },
+    });
+  const res = await mod.GET(authedRequest);
   const body = await res.json();
   return { res, status: res.status, body };
 }
@@ -129,7 +176,10 @@ describe("GET /api/metrics", () => {
       last24h: 20,
       lastHour: 5,
       politicsNullImage: 3,
+      politicsTotal: 16,
       withImage: 77,
+      // 3 / 16 = 0.1875 → 0.19 (rounded to 2 decimal places)
+      politicsImageMissingRatio: 0.19,
     });
 
     expect(body.clusters).toEqual({
@@ -138,6 +188,18 @@ describe("GET /api/metrics", () => {
       blindspots: 2,
       // 100 / 40 = 2.5 (rounded to 2 decimal places)
       avgArticlesPerCluster: 2.5,
+      // (100 - (40 - 12)) / 12 = 72 / 12 = 6 — singleton clusters hold
+      // exactly one article each, so 72 articles live in the 12
+      // multi-article clusters.
+      avgArticlesPerMultiCluster: 6,
+      neutralizedEligible: 10,
+      neutralized: 7,
+      // 7 / 10 = 0.70 — well below the 0.9 page threshold the docs
+      // call out as the headline-cron drift signal.
+      neutralizedRatio: 0.7,
+      // null because the fake's index-12 row returns data: null,
+      // meaning "no pending row at all".
+      oldestPendingNeutralAgeSec: null,
     });
 
     expect(body.sources).toEqual({
@@ -146,9 +208,12 @@ describe("GET /api/metrics", () => {
     });
   });
 
-  it("sets a 60-second public cache header", async () => {
+  it("returns the no-store cache header so auth-gated data is not CDN-cached", async () => {
     const { res } = await callGet();
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=60");
+    // The metrics route used to emit `public, max-age=60` but the
+    // worker-stream refactor moved the route behind a bearer gate; we no
+    // longer want any cache layer between Vercel and the dashboard.
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
   it("treats null count values as 0", async () => {
@@ -159,9 +224,12 @@ describe("GET /api/metrics", () => {
     expect(body.articles.last24h).toBe(0);
     expect(body.articles.lastHour).toBe(0);
     expect(body.articles.politicsNullImage).toBe(0);
+    expect(body.articles.politicsTotal).toBe(0);
+    expect(body.articles.politicsImageMissingRatio).toBe(0);
     expect(body.articles.withImage).toBe(0);
     expect(body.clusters.total).toBe(0);
     expect(body.clusters.multiArticle).toBe(0);
+    expect(body.clusters.avgArticlesPerMultiCluster).toBe(0);
     expect(body.clusters.blindspots).toBe(0);
     expect(body.sources.total).toBe(0);
     expect(body.sources.active).toBe(0);
@@ -169,8 +237,8 @@ describe("GET /api/metrics", () => {
 
   it("sets avgArticlesPerCluster to 0 when there are no clusters (avoids div-by-zero)", async () => {
     currentCounts = [...DEFAULT_COUNTS];
-    // clustersTotal is index 5
-    currentCounts[5] = { count: 0, error: null };
+    // clustersTotal is index 6
+    currentCounts[6] = { count: 0, error: null };
     const { status, body } = await callGet();
     expect(status).toBe(200);
     expect(body.clusters.total).toBe(0);
@@ -181,8 +249,38 @@ describe("GET /api/metrics", () => {
     currentCounts = [...DEFAULT_COUNTS];
     // 7 articles / 3 clusters = 2.3333... → rounds to 2.33
     currentCounts[0] = { count: 7, error: null }; // articlesTotal
-    currentCounts[5] = { count: 3, error: null }; // clustersTotal
+    currentCounts[6] = { count: 3, error: null }; // clustersTotal
     const { body } = await callGet();
     expect(body.clusters.avgArticlesPerCluster).toBe(2.33);
+  });
+
+  it("sets politicsImageMissingRatio to 0 when there are no politics articles", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    currentCounts[4] = { count: 0, error: null }; // politicsTotal
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.articles.politicsTotal).toBe(0);
+    expect(body.articles.politicsImageMissingRatio).toBe(0);
+  });
+
+  it("computes avgArticlesPerMultiCluster over multi-article clusters only", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    // 50 articles, 20 clusters, 7 of them multi-article:
+    // (50 - (20 - 7)) / 7 = 37 / 7 = 5.2857... → rounds to 5.29
+    currentCounts[0] = { count: 50, error: null }; // articlesTotal
+    currentCounts[6] = { count: 20, error: null }; // clustersTotal
+    currentCounts[7] = { count: 7, error: null }; // clustersMulti
+    const { body } = await callGet();
+    expect(body.clusters.avgArticlesPerMultiCluster).toBe(5.29);
+    // The all-clusters mean keeps its original denominator: 50 / 20 = 2.5.
+    expect(body.clusters.avgArticlesPerCluster).toBe(2.5);
+  });
+
+  it("sets avgArticlesPerMultiCluster to 0 when there are no multi-article clusters", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    currentCounts[7] = { count: 0, error: null }; // clustersMulti
+    const { body } = await callGet();
+    expect(body.clusters.multiArticle).toBe(0);
+    expect(body.clusters.avgArticlesPerMultiCluster).toBe(0);
   });
 });

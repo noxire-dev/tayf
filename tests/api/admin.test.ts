@@ -1,15 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
-// Supabase mock plumbing for /api/admin and the cron routes it delegates to.
+// Supabase mock plumbing for /api/admin.
 //
-// The admin route issues four count queries + one sources list; the cron
-// routes each issue their own handful of queries. Rather than track every
-// call order, we expose a single thenable chain whose terminal resolution is
-// `{ data, count, error }` and let each test override the response for a
-// specific table via `setTableResponse`.
-//
-// We also stub the RSS helpers so `cron/ingest` can't try to hit real feeds.
+// The admin route issues four count queries + one sources list. Rather than
+// track every call order, we expose a single thenable chain whose terminal
+// resolution is `{ data, count, error }` and let each test override the
+// response for a specific table via `setTableResponse`.
 // ---------------------------------------------------------------------------
 
 interface TableResponse {
@@ -61,22 +58,12 @@ vi.mock("@supabase/supabase-js", () => ({
   }),
 }));
 
-// Stub RSS helpers so cron/ingest's happy path is exercisable without any
-// network. `fetchAllFeeds` returning [] is enough — the route's per-source
-// loop becomes a no-op.
-vi.mock("@/lib/rss/fetcher", () => ({ fetchAllFeeds: async () => [] }));
-vi.mock("@/lib/rss/normalize", () => ({ normalizeArticles: () => [] }));
-vi.mock("@/lib/rss/og-image", () => ({
-  batchFetchOgImages: async () => new Map(),
-  fetchOgImage: async () => null,
-}));
-
-// The cron routes call `await connection()` at the top so Next.js 16's
-// cache-components prerender doesn't choke on `request.headers`. Outside a
-// Next.js request scope (i.e. here in vitest) the real `connection()` throws
-// "called outside a request scope" — resolve it to a no-op so the handlers
-// can run. Everything else from `next/server` (NextResponse, etc.) passes
-// through untouched via `importOriginal`.
+// The admin route calls `await connection()` indirectly via shared helpers
+// so Next.js 16's cache-components prerender doesn't choke on
+// `request.headers`. Outside a Next.js request scope (i.e. here in vitest)
+// the real `connection()` throws "called outside a request scope" — resolve
+// it to a no-op so the handlers can run. Everything else from `next/server`
+// (NextResponse, etc.) passes through untouched via `importOriginal`.
 vi.mock("next/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("next/server")>();
   return {
@@ -212,29 +199,6 @@ describe("/api/admin (unauthenticated)", () => {
     });
     const res = await mod.POST(req);
     expect(res.status).toBe(401);
-  });
-});
-
-describe("GET /api/cron/ingest", () => {
-  it("returns 200 or 401 (depending on CRON_SECRET)", async () => {
-    // Flip CRON_SECRET on and send no auth header → 401. Still inside the
-    // allowed [200, 401] set and avoids needing a full RSS happy-path mock.
-    process.env.CRON_SECRET = "test-cron-secret";
-    const mod = await import("@/app/api/cron/ingest/route");
-    const res = await mod.GET(new Request("http://example.com/api/cron/ingest"));
-    expect([200, 401]).toContain(res.status);
-  });
-});
-
-describe("GET /api/cron/backfill-images", () => {
-  it("returns 200 (assuming no CRON_SECRET)", async () => {
-    // No CRON_SECRET → auth passes. Default articles response is `data: []`,
-    // so the route short-circuits with `{ message: "No articles need images" }`.
-    const mod = await import("@/app/api/cron/backfill-images/route");
-    const res = await mod.GET(
-      new Request("http://example.com/api/cron/backfill-images"),
-    );
-    expect([200, 401]).toContain(res.status);
   });
 });
 

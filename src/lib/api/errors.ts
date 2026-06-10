@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { unstable_rethrow } from "next/navigation";
+import { captureServerException } from "@/lib/sentry/server";
 
 /**
  * Canonical error response shape for every JSON route under `src/app/api/`.
@@ -41,14 +42,24 @@ export const apiBadRequest = (
 export const apiNotFound = (what = "Not found") => apiError(404, what);
 
 /**
- * 500 — unexpected server error. Logs to stderr with an `[api]` prefix so
- * these stand out in Vercel / tmux logs, and returns the message back to the
- * caller. Swap the logger here if we ever wire up a real observability stack.
+ * 500 — unexpected server error. Logs the raw error (with stack) to stderr
+ * under an `[api]` prefix tagged with a per-invocation `request_id`, and
+ * returns ONLY a generic message plus that `request_id` to the caller. The
+ * raw `err.message` is NEVER serialised into the response body — Supabase /
+ * upstream error strings frequently embed table names, constraint names,
+ * and other internal schema detail we don't want to hand to an attacker.
+ * Operators correlate a user-visible `request_id` to the matching stderr
+ * line for triage. Swap the logger here if we ever wire up a real
+ * observability stack.
  */
 export const apiServerError = (err: unknown, code?: string) => {
-  const message = err instanceof Error ? err.message : String(err);
-  console.error("[api]", message, err);
-  return apiError(500, message, code ? { code } : undefined);
+  const requestId = crypto.randomUUID();
+  console.error("[api]", requestId, err);
+  return apiError(
+    500,
+    "Internal server error",
+    code ? { code, details: { request_id: requestId } } : { details: { request_id: requestId } },
+  );
 };
 
 /**
@@ -65,7 +76,9 @@ export const apiServerError = (err: unknown, code?: string) => {
  * a route touches request.headers / cookies / dynamic APIs), etc. Those
  * errors MUST propagate up to Next's internals or the framework gets
  * confused and logs spurious 500s during build/prerender. Real errors
- * fall through to `apiServerError`.
+ * are reported to Sentry (B8 observability) and then fall through to
+ * `apiServerError`. Sentry capture runs AFTER `unstable_rethrow` so we
+ * don't pollute Sentry with framework control-flow signals.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function withApiErrors<T extends (...args: any[]) => Promise<Response>>(
@@ -76,6 +89,7 @@ export function withApiErrors<T extends (...args: any[]) => Promise<Response>>(
       return await handler(...args);
     } catch (err) {
       unstable_rethrow(err);
+      captureServerException(err);
       return apiServerError(err);
     }
   }) as T;

@@ -4,9 +4,11 @@
 
 ### `GET /api/health`
 
-Health check. Returns subsystem status for database, environment, and ingestion freshness.
+Health check. Returns subsystem status for database, environment, ingestion freshness, clustering freshness, and queue depth.
 
-**Response** `200 | 503`:
+Two-tier response. Anonymous callers (no `Authorization` header) get only `{ "status", "timestamp" }` and are rate-limited (5-token bucket, 1 token/sec refill; the limiter is process-local, so the cap applies per serverless instance, not globally). Callers presenting `Authorization: Bearer <CRON_SECRET>` get the full per-check breakdown and bypass the rate limit; the bearer gate is the shared `requireCronBearer` helper (`src/lib/api/bearer.ts`) — case-insensitive scheme, constant-time compare, FAIL-CLOSED 503 when `CRON_SECRET` is unset/empty, 401 on a mismatched token.
+
+**Response** `200 | 503` (bearer-authenticated):
 ```json
 {
   "status": "healthy" | "degraded" | "unhealthy",
@@ -14,13 +16,18 @@ Health check. Returns subsystem status for database, environment, and ingestion 
   "checks": {
     "database": { "ok": true, "latencyMs": 42 },
     "env": { "ok": true, "missing": [] },
-    "ingestion": { "ok": true, "lastArticleAgeSec": 120 }
+    "ingestion": { "ok": true, "lastArticleAgeSec": 120 },
+    "clustering": { "ok": true, "lastClusterAgeSec": 300 },
+    "queues": { "ok": true, "metrics": [{ "queue": "cluster_work", "queueLength": 0, "oldestMsgAgeSec": null }, { "queue": "image_backfill", "queueLength": 0, "oldestMsgAgeSec": null }] }
   }
 }
 ```
 
 - `unhealthy` (503): database or env failure
-- `degraded` (200): ingestion stale (>10 min since last article)
+- `degraded` (200): ingestion stale (>10 min since last article), clustering stale (>15 min), queue alarm (per-queue depth bound — `cluster_work` >500, `image_backfill` >100 — or oldest message >30 min), or a malformed `worker_metrics` row (NULL / non-numeric `queue_length`)
+- `401`: `Authorization` header present but token mismatch
+- `503` + error envelope: `Authorization` header present but `CRON_SECRET` not configured (FAIL-CLOSED)
+- `429`: anonymous rate limit exhausted
 - Each subsystem check has a 2s timeout
 
 ---
@@ -29,15 +36,21 @@ Health check. Returns subsystem status for database, environment, and ingestion 
 
 Live counts for articles, clusters, and sources.
 
-**Response** `200` (cached 60s):
+**Headers**: `Authorization: Bearer <CRON_SECRET>` (required — same shared `requireCronBearer` gate as `/api/cron/headline`: 503 FAIL-CLOSED when `CRON_SECRET` is unset/empty, 401 on a mismatched token). Auth-gated operational data is served with `Cache-Control: no-store`.
+
+**Response** `200`:
 ```json
 {
   "timestamp": "...",
-  "articles": { "total": 22000, "last24h": 850, "lastHour": 42, "politicsNullImage": 15, "withImage": 20500 },
-  "clusters": { "total": 1200, "multiArticle": 980, "blindspots": 12, "avgArticlesPerCluster": 18.33 },
+  "articles": { "total": 22000, "last24h": 850, "lastHour": 42, "politicsNullImage": 250, "politicsTotal": 12500, "withImage": 20500, "politicsImageMissingRatio": 0.02 },
+  "clusters": { "total": 1200, "multiArticle": 980, "blindspots": 12, "avgArticlesPerCluster": 18.33, "avgArticlesPerMultiCluster": 22.22, "neutralizedEligible": 700, "neutralized": 665, "neutralizedRatio": 0.95, "oldestPendingNeutralAgeSec": 480 },
   "sources": { "total": 144, "active": 140 }
 }
 ```
+
+- `politicsImageMissingRatio`: `politicsNullImage / politicsTotal` (politics tier = `politika` + `son_dakika`), 2 decimals; 0 when `politicsTotal` is 0
+- `avgArticlesPerCluster` averages over ALL clusters (singletons included); `avgArticlesPerMultiCluster` averages only over multi-article clusters — `(total articles - singleton clusters) / multiArticle`, 2 decimals, 0 when `multiArticle` is 0
+- `neutralizedRatio`: `neutralized / neutralizedEligible`, 2 decimals; `oldestPendingNeutralAgeSec` is null when no eligible cluster is awaiting a neutral headline
 
 ---
 
@@ -77,35 +90,47 @@ Admin actions. Rate limited: 20-token bucket, 0.2 tokens/sec refill.
 
 ---
 
-### `GET /api/cron/ingest`
+### `GET /api/cron/headline`
 
-Manual/cron RSS ingestion. Skips if the tmux worker inserted articles in the last 30s.
+LLM-generates neutral Turkish headlines (`title_tr_neutral`) for clusters that still lack one. This is the **only** Vercel cron in the worker-stream architecture: ingestion, cluster fan-out, and og:image backfill all run on `pg_cron` schedules (`ingest-drain`, `cluster-drain`, `image-drain`) that `net.http_post` directly into the Supabase Edge Functions. The legacy `/api/cron/ingest` and `/api/cron/backfill-images` routes have been removed.
 
-**Headers**: `Authorization: Bearer <CRON_SECRET>` (if `CRON_SECRET` is set)
+**Headers**: `Authorization: Bearer <CRON_SECRET>` (required — the route is FAIL-CLOSED on a missing or empty `CRON_SECRET` in the runtime environment and returns 503 on every invocation in that case).
 
-**Rate limit**: 5-token bucket, 1 token/60s refill.
+The bearer gate is the shared `requireCronBearer` helper (`src/lib/api/bearer.ts`): the scheme is matched case-insensitively and the token is compared with `crypto.timingSafeEqual`. Vercel cron supplies this header automatically when scheduled via `vercel.json` / `vercel.ts`.
 
-**Response** `200`:
+**Rate limit**: 5-token bucket, 1 token / 60 seconds refill. The cron itself ticks every 5 minutes so this exists mainly to absorb ad-hoc `curl` floods with a valid secret. Per-cycle wall budget: `maxDuration = 60s`.
+
+**Response** `200` — success envelope (work was done):
 ```json
 {
   "success": true,
-  "totalInserted": 42,
-  "totalOgFetched": 5,
-  "totalErrors": 1,
-  "sources": { "sabah": { "inserted": 3, "ogImages": 1 }, "diken": { "inserted": 0, "error": "timeout" } },
-  "timestamp": "..."
+  "rewrote": 3,
+  "skipped": 1,
+  "errored": 0,
+  "perCluster": {
+    "<cluster_id>": { "status": "rewrote" },
+    "<cluster_id>": { "status": "skipped" },
+    "<cluster_id>": { "status": "errored", "error": "rewriteClusterHeadline failed" }
+  },
+  "timestamp": "2026-06-07T12:00:00.000Z"
 }
 ```
 
----
+**Response** `200` — soft no-op when `ANTHROPIC_API_KEY` is unset (the cron keeps firing every 5 minutes; dropping the key into env vars heals on the next tick without a manual kick):
+```json
+{ "skipped": true, "reason": "LLM API key not set", "timestamp": "..." }
+```
 
-### `GET /api/cron/backfill-images`
+**Response** `200` — no candidates this tick:
+```json
+{ "success": true, "rewrote": 0, "skipped": 0, "errored": 0, "reason": "no candidates", "timestamp": "..." }
+```
 
-Fetches og:image for up to 30 imageless articles per call.
+**Response** `401`: missing / wrong bearer.
+**Response** `429`: rate limit exhausted; envelope includes `details.retryAfterMs`.
+**Response** `503`: `CRON_SECRET` not configured in the runtime environment (FAIL-CLOSED).
 
-**Headers**: `Authorization: Bearer <CRON_SECRET>` (if set)
-
-**Rate limit**: 5-token bucket, 1 token/60s refill.
+Per-cluster errors in the success envelope are coarse-tagged (`"rewriteClusterHeadline failed"`, `"member-fetch-failed"`) — raw `err.message` is logged server-side / to Sentry, never embedded in the response body.
 
 ---
 
@@ -204,36 +229,37 @@ Renders Turkish blurbs like: `⚡ Sözcü (muhalefet) bu iktidara yakın habere 
 
 ---
 
-### `fetchAllFeeds(sources)`
+### `fetchFeed(source, opts)`
 
 ```typescript
-// src/lib/rss/fetcher.ts
-async function fetchAllFeeds(sources: Source[]): Promise<FetchResult[]>
+// supabase/functions/_shared/rss/fetcher.ts (Deno)
+async function fetchFeed(source: Source, opts?: FetchOpts): Promise<FetchResult>
 ```
 
-Fetches all RSS feeds in parallel. Each result contains `{ source, items: RawFeedItem[], error? }`.
+Fetches a single RSS feed with charset-aware decoding (iso-8859-9 / windows-1254 / UTF-8 via XML declaration sniff) and per-source header overrides. Lives in the `ingest` Edge Function. The cycle drives parallel calls itself via a bounded worker pool.
 
 ---
 
-### `normalizeArticles(source, items)`
+### `normalizeItem(source, item)`
 
 ```typescript
-// src/lib/rss/normalize.ts
-function normalizeArticles(source: Source, items: RawFeedItem[]): NormalizedArticle[]
+// supabase/functions/_shared/rss/normalize.ts (Deno)
+function normalizeItem(source: Source, item: RawFeedItem): NormalizedArticle | null
 ```
 
-Normalizes raw RSS items: URL canonicalization, HTML entity decoding, image extraction, SHA256 content hashing, keyword-based category classification.
+Normalizes one raw RSS item: URL canonicalization, HTML entity decoding, og:image extraction, sha1-of-shingles `content_hash` (40-char hex; sha256 was retired in migration 016 and locked out by migration 026's CHECK constraint), keyword-based category classification. Returns `null` if the item cannot be hashed even with the URL fallback.
 
 ---
 
-### `fetchOgImage(url)`
+### `fetchHeroImage(url)` / `fetchOgImage(url)`
 
 ```typescript
-// src/lib/rss/og-image.ts
-async function fetchOgImage(url: string): Promise<string | null>
+// supabase/functions/_shared/og-image.ts (Deno)
+async function fetchHeroImage(articleUrl: string): Promise<string | null>
+async function fetchOgImage(articleUrl: string): Promise<string | null>
 ```
 
-Fetches a page's `og:image` meta tag. Reads only the first 50KB (up to `</head>`). 8s timeout.
+Resolve the cover image for an article URL. Used by the `image-consumer` Edge Function. Reads only the first 50KB up to `</head>` and routes every outbound fetch through `_shared/safe-fetch.ts`, which DNS-resolves the host and rejects RFC1918, loopback, link-local, ULA, CGNAT, and IPv6 documentation prefixes (audit T3 SSRF allowlist).
 
 ---
 
