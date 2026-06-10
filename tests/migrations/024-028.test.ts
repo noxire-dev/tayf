@@ -144,6 +144,20 @@ describe("migration 025_worker_triggers.sql (static)", () => {
     expect(sql).toMatch(/pg_catalog\.jsonb_build_object/);
   });
 
+  it("revokes EXECUTE on both enqueue functions from anon + authenticated (close the PostgREST RPC exposure)", () => {
+    // Supabase auto-grants EXECUTE on new public functions to anon +
+    // authenticated, so without an explicit revoke both trigger functions
+    // are callable unauthenticated via POST /rest/v1/rpc/enqueue_*. Pin
+    // the revoke for each function and require anon + authenticated to be
+    // named (revoking from public alone leaves the role-direct grants).
+    expect(sql).toMatch(
+      /revoke\s+execute\s+on\s+function\s+enqueue_cluster_work\(\)\s+from\s+[^;]*\banon\b[^;]*\bauthenticated\b/i,
+    );
+    expect(sql).toMatch(
+      /revoke\s+execute\s+on\s+function\s+enqueue_image_backfill\(\)\s+from\s+[^;]*\banon\b[^;]*\bauthenticated\b/i,
+    );
+  });
+
   it("grants pgmq.send EXECUTE to the SECURITY DEFINER owner roles (postgres, supabase_admin)", () => {
     // Round-4 fix: the SECURITY DEFINER trigger functions invoke pgmq.send
     // under the function-owner identity; without this grant the trigger
@@ -168,16 +182,41 @@ describe("migration 026_unify_content_hash_v2.sql (static)", () => {
     expect(sql.length).toBeGreaterThan(0);
   });
 
-  it("backfills any row whose content_hash is 64 hex chars (sha256 regime)", () => {
-    expect(sql).toMatch(/length\(content_hash\)\s*=\s*64/i);
+  it("is NON-DESTRUCTIVE — contains no DELETE of sha256-length rows", () => {
+    // Production hardening: 95% of the corpus carries 64-hex sha256
+    // hashes (old data) and 5% carries 40-hex sha1 (new ingest); the two
+    // regimes coexist permanently. The earlier draft hard-deleted every
+    // 64-hex row to enforce a length=40 CHECK, which on the live DB would
+    // have destroyed 95% of articles (cascading through cluster_articles).
+    // The migration must not delete anything.
+    expect(sql).not.toMatch(/delete\s+from\s+articles/i);
+    expect(sql).not.toMatch(/\bdelete\s+from\b/i);
   });
 
-  it("adds a CHECK constraint enforcing lowercase 40-hex sha1 hashes going forward", () => {
-    // P3-7 fix: the constraint pins content (lowercase hex), not just
-    // length — a 40-char uppercase or non-hex value must also bounce.
+  it("adds a PERMISSIVE dual-regime CHECK (lowercase 40-hex OR 64-hex, or null)", () => {
+    // The only enforcement: content_hash is null, or lowercase-hex of
+    // length 40 (sha1) OR 64 (sha256). Every existing row already
+    // satisfies this, so it rejects nothing in the table — it only bars a
+    // future uppercase / truncated / non-hex write.
     expect(sql).toMatch(
+      /check\s*\(\s*content_hash\s+is\s+null\s+or\s+content_hash\s*~\s*'\^\[0-9a-f\]\{40\}\$'\s+or\s+content_hash\s*~\s*'\^\[0-9a-f\]\{64\}\$'\s*\)/i,
+    );
+  });
+
+  it("adds the CHECK as NOT VALID (no full-table validate lock on ~355k rows)", () => {
+    // NOT VALID still enforces the predicate on every new write; it only
+    // skips the one-time scan/lock of pre-existing rows (already valid).
+    expect(sql).toMatch(/add\s+constraint\s+articles_content_hash_length_chk[\s\S]*\bnot\s+valid\b/i);
+  });
+
+  it("does NOT install a strict length=40-only CHECK", () => {
+    // A constraint that accepts only 40-hex would reject the 95% sha256
+    // majority. The 64-hex branch must be present (asserted above); a
+    // bare 40-only regex with no 64 alternative is a regression.
+    expect(sql).not.toMatch(
       /check\s*\(\s*content_hash\s+is\s+null\s+or\s+content_hash\s*~\s*'\^\[0-9a-f\]\{40\}\$'\s*\)/i,
     );
+    expect(sql).not.toMatch(/check\s*\(\s*length\(content_hash\)\s*=\s*40\s*\)/i);
   });
 
   it("does NOT drop the UNIQUE constraint on (source_id, content_hash)", () => {
@@ -236,9 +275,15 @@ describe("migration 027_cluster_link_atomic.sql (static)", () => {
     expect(updateIdx).toBeGreaterThan(countIdx);
   });
 
-  it("grants EXECUTE to service_role only (no anon / authenticated / public)", () => {
-    expect(sql).toMatch(/revoke\s+all\s+on\s+function\s+public\.cluster_link_atomic[^;]+from\s+public/i);
-    expect(sql).toMatch(/grant\s+execute\s+on\s+function\s+public\.cluster_link_atomic[^;]+to\s+service_role/i);
+  it("grants EXECUTE to service_role only (revokes from anon / authenticated / public)", () => {
+    // Supabase auto-grants EXECUTE to anon + authenticated on creation, so
+    // the revoke must name them explicitly — revoking from public alone
+    // leaves the role-direct grants and the RPC stays exposed via
+    // PostgREST. The service_role grant is the only access kept.
+    expect(sql).toMatch(
+      /revoke\s+execute\s+on\s+function\s+public\.cluster_link_atomic[\s\S]*from\s+[^;]*\banon\b[^;]*\bauthenticated\b[^;]*\bpublic\b/i,
+    );
+    expect(sql).toMatch(/grant\s+execute\s+on\s+function\s+public\.cluster_link_atomic[\s\S]*to\s+service_role/i);
     expect(sql).not.toMatch(/grant\s+execute\s+on\s+function\s+public\.cluster_link_atomic[^;]+to\s+(anon|authenticated)/i);
   });
 
@@ -265,10 +310,23 @@ describe("migration 028_drop_worker_checkpoint.sql (static)", () => {
     expect(sql.length).toBeGreaterThan(0);
   });
 
-  it("drops the trigger, the function, and the table — all IF EXISTS", () => {
+  it("drops the trigger and the function", () => {
     expect(sql).toMatch(/drop\s+trigger\s+if\s+exists\s+worker_checkpoint_set_updated_at/i);
     expect(sql).toMatch(/drop\s+function\s+if\s+exists\s+public\.worker_checkpoint_set_updated_at/i);
-    expect(sql).toMatch(/drop\s+table\s+if\s+exists\s+public\.worker_checkpoint/i);
+    expect(sql).toMatch(/drop\s+table\s+public\.worker_checkpoint/i);
+  });
+
+  it("guards the trigger + table drop behind a worker_checkpoint existence check (fresh-DB safe)", () => {
+    // `drop trigger if exists ... on public.worker_checkpoint` raises
+    // 42P01 when the TABLE is absent (IF EXISTS covers the trigger, not
+    // the table), which fails the migration on every fresh DB. The
+    // trigger + table drops must sit inside a pg_class existence check.
+    expect(sql).toMatch(
+      /if\s+exists\s*\([\s\S]*pg_class[\s\S]*c\.relname\s*=\s*'worker_checkpoint'[\s\S]*\)\s*then/i,
+    );
+    // The bare table drop must NOT appear outside a guard as an
+    // unconditional statement (no IF EXISTS fallback was kept).
+    expect(sql).not.toMatch(/drop\s+table\s+if\s+exists\s+public\.worker_checkpoint/i);
   });
 });
 
@@ -388,7 +446,27 @@ describe.runIf(LIVE)("migrations 024–026 (live against SUPABASE_LOCAL_URL)", (
     expect(afterN).toBe(beforeN + 1);
   });
 
-  it("the content_hash CHECK constraint rejects sha256-length values", async () => {
+  it("the content_hash CHECK accepts both sha1(40) and sha256(64) lowercase hex", async () => {
+    // Dual-regime: old data is sha256 (64-hex), new ingest is sha1
+    // (40-hex). Both must be insertable — the permissive CHECK rejects
+    // neither.
+    for (const hash of ["a".repeat(40), "a".repeat(64)]) {
+      await client.query(
+        "insert into articles (title, url, source_id, content_hash, category) values ($1, $2, $3, $4, $5)",
+        [
+          "live-good-hash",
+          `https://example.com/good-${hash.length}-${Date.now()}`,
+          "00000000-0000-0000-0000-000000000000",
+          hash,
+          "politika",
+        ],
+      );
+    }
+  });
+
+  it("the content_hash CHECK rejects a non-hex / wrong-length value", async () => {
+    // The permissive CHECK still bars anything that is not lowercase hex
+    // of length 40 or 64 — e.g. an uppercase or truncated digest.
     let threw = false;
     try {
       await client.query(
@@ -397,7 +475,7 @@ describe.runIf(LIVE)("migrations 024–026 (live against SUPABASE_LOCAL_URL)", (
           "live-bad-hash",
           `https://example.com/bad-${Date.now()}`,
           "00000000-0000-0000-0000-000000000000",
-          "a".repeat(64), // sha256 length — must violate the CHECK.
+          "A".repeat(40), // uppercase — must violate the lowercase-hex CHECK.
           "politika",
         ],
       );

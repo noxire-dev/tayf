@@ -8,7 +8,7 @@
 -- consumer Edge Function via pg_cron-driven drains.
 --
 -- Migration order: 024 (pgmq install + queues) → 025 (these triggers) →
--- 026 (content_hash rehash). The migration is idempotent: triggers and
+-- 026 (content_hash dual-regime CHECK). The migration is idempotent: triggers and
 -- their backing functions are dropped before recreate, so re-running this
 -- file against a database where 025 has already been applied is safe.
 --
@@ -144,6 +144,14 @@ comment on function enqueue_cluster_work() is
   'Trigger fn: enqueues a cluster_work message for each newly inserted '
   'politics article. Payload: {article_id: uuid}. See migration 025.';
 
+-- Supabase auto-grants EXECUTE on new public functions to anon +
+-- authenticated, which would expose this SECURITY DEFINER function via
+-- PostgREST (POST /rest/v1/rpc/enqueue_cluster_work) to unauthenticated
+-- callers. It is a trigger function and has no business being callable
+-- over the REST API; revoke EXECUTE from every client-facing role. The
+-- table trigger still invokes it under the function-owner identity.
+revoke execute on function enqueue_cluster_work() from anon, authenticated, public;
+
 create trigger articles_cluster_enqueue
   after insert on articles
   for each row
@@ -228,6 +236,12 @@ comment on function enqueue_image_backfill() is
   'Trigger fn: enqueues an image_backfill message for each newly '
   'inserted article that lacks image_url. Payload: {article_id: uuid}. '
   'See migration 025.';
+
+-- Same exposure as enqueue_cluster_work above: Supabase auto-grants
+-- EXECUTE to anon + authenticated on creation, making this trigger
+-- function callable via PostgREST. Revoke it from every client-facing
+-- role; only the table trigger invokes it.
+revoke execute on function enqueue_image_backfill() from anon, authenticated, public;
 
 create trigger articles_image_enqueue
   after insert on articles

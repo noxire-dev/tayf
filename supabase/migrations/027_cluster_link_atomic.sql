@@ -101,10 +101,14 @@ comment on function public.cluster_link_atomic(
 
 -- Service role calls this from the cluster-consumer Edge Function;
 -- no anon / authenticated access is granted (the function reads + writes
--- gameplay tables that are already revoked from those roles).
-revoke all on function public.cluster_link_atomic(
+-- gameplay tables that are already revoked from those roles). Supabase
+-- auto-grants EXECUTE to anon + authenticated on creation, so naming them
+-- explicitly here (alongside public) is required to actually close the
+-- PostgREST /rest/v1/rpc/cluster_link_atomic exposure — revoking from
+-- public alone does not strip the role-direct grants.
+revoke execute on function public.cluster_link_atomic(
   uuid, uuid, jsonb, boolean, text, timestamptz
-) from public;
+) from anon, authenticated, public;
 grant execute on function public.cluster_link_atomic(
   uuid, uuid, jsonb, boolean, text, timestamptz
 ) to service_role;
