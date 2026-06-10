@@ -53,20 +53,20 @@ Replace the tmux pattern with an **event-driven worker stream** colocated with t
 | T3 | `/api/cron/headline` had no fail-closed behaviour when `CRON_SECRET` was unset | Bearer check is constant-time (`crypto.timingSafeEqual`) and **fail-closed** when the env var is missing or empty (returns 503, never 200). Mirror pattern in `/api/metrics`. |
 | T5 | `err.message` leaks in 500 response bodies | All routes route through `withApiErrors`; 500 bodies are now a canonical envelope with a `request_id` and the raw error is sent to Sentry / Edge Function logs only. |
 | T6 | No Sentry coverage on the Deno side (long-running worker errors were invisible) | New `supabase/functions/_shared/sentry.ts` wraps all three Edge Functions. Graceful no-op when `SENTRY_DSN` is unset. |
-| T7 | Two parallel `content_hash` regimes (sha1-of-shingles in some paths, raw-URL sha256 in others) caused dedup misses and double-write storms | Migration `026_unify_content_hash_v2.sql` hard-deletes the sha256 stragglers (each a silent duplicate of its sha1 twin; the delete cascades through `cluster_articles`) and installs a `CHECK (length(content_hash) = 40)` constraint enforcing the canonical sha1-of-shingles regime. |
+| T7 | Two parallel `content_hash` regimes (sha1-of-shingles in newer paths, raw-URL sha256 in older data) | Treated as a permanent, intentional dual regime: old rows keep their 64-hex sha256, new ingest writes 40-hex sha1, and the two coexist without conflict (`articles_source_content_hash_key` is UNIQUE on the raw bytes; the pipeline never compares across regimes). Migration `026_unify_content_hash_v2.sql` deletes nothing — it installs a permissive `CHECK (content_hash is null or content_hash ~ '^[0-9a-f]{40}$' or content_hash ~ '^[0-9a-f]{64}$')`, added `NOT VALID` so it takes no validate lock. That CHECK is the only enforcement. |
 
 ## 5. Migration plan
 
-The branch is structured so that the cutover is reversible up to the point of running migration 026.
+The branch is structured so that the cutover is fully reversible — no migration in the set destroys data.
 
 1. **Pre-deploy (no production change)** — review the branch, run `tsc` + `vitest`, lint the migrations.
-2. **Database** — apply `024_pgmq_setup.sql`, `025_worker_triggers.sql`, `026_unify_content_hash_v2.sql` in order. Migration 026 is the only destructive one (hard-deletes any sha256-length stragglers; see the rollback note below). Take a database snapshot first.
+2. **Database** — apply `024_pgmq_setup.sql`, `025_worker_triggers.sql`, `026_unify_content_hash_v2.sql` in order. Migration 026 deletes nothing — it adds a permissive dual-regime `content_hash` CHECK (`NOT VALID`, no validate lock). Take a database snapshot first as routine hygiene.
 3. **Edge Functions** — `supabase functions deploy ingest cluster-consumer image-consumer` with `SENTRY_DSN`, `SERVICE_ROLE_KEY`, and `app.service_role_key` GUC configured.
 4. **pg_cron** — install three jobs (`ingest-drain`, `cluster-drain`, `image-drain`). The exact `cron.schedule(...)` statements are in [`../migration-guide.md`](../migration-guide.md) step 3.
 5. **Vercel** — deploy the branch; `/api/cron/headline` is the only Vercel cron in the new pipeline.
 6. **Decommission** — stop the tmux workers on the VM; the `scripts/*-worker.mjs` runners have already been deleted from the repo. The cluster reference libraries under `scripts/lib/cluster/*.mjs` are intentionally retained as the parity-test golden vector for `tests/functions/_shared/cluster.test.ts`.
 
-Rollback up to step 3: revert the branch on Vercel and stop the new pg_cron jobs. The pgmq queues are append-only and idle when no consumer is draining them. Migration 026 has no reverse: it hard-deletes every row still carrying a sha256-length `content_hash` (each a silent duplicate of its sha1 twin), and the delete cascades through `cluster_articles` via `ON DELETE CASCADE`. The CHECK constraint it installs can be dropped manually, but the deleted rows are recoverable only from the pre-migration snapshot — a restore brings back the duplicate articles and their cascaded `cluster_articles` memberships, at the cost of reverting everything else written since the snapshot.
+Rollback up to step 3: revert the branch on Vercel and stop the new pg_cron jobs. The pgmq queues are append-only and idle when no consumer is draining them. Migration 026 needs no reverse: it deletes no rows and rewrites no hashes. The only artefact it adds is the permissive dual-regime CHECK, which accepts every existing row (sha256 and sha1 alike) and can be dropped manually if ever required (`alter table articles drop constraint articles_content_hash_length_chk`). There is no data loss to restore from a snapshot.
 
 ## 6. Consequences
 

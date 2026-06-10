@@ -43,7 +43,7 @@ Confirm you have:
 - The current main branch is healthy: `npm run build` passes, `npm test` passes.
 - A maintenance window. Article ingestion stops for the few minutes between turning off the legacy worker and the new cron schedule firing. Cluster + image-backfill have visibility-timeout-driven re-delivery so partial-state hand-off is safe, but the gap is real.
 
-Take a database snapshot before starting (Supabase Dashboard → Database → Backups → Create snapshot). The migrations are additive but migration 026 hard-deletes rows still under the sha256 regime (silent duplicates of their sha1 twins; the delete cascades through `cluster_articles`) — irreversible without a restore.
+Take a database snapshot before starting (Supabase Dashboard → Database → Backups → Create snapshot) — standard pre-migration hygiene. Every migration in this set is non-destructive: migration 026 deletes nothing. It only installs a permissive format CHECK that accepts the dual content_hash regime (old sha256, 64-hex; new sha1, 40-hex), and it adds the constraint `NOT VALID` so it does not even take a validate lock on the existing rows.
 
 If `supabase link` has not been run on this machine yet, link now so subsequent commands resolve the project without the `--project-ref` flag:
 
@@ -99,7 +99,8 @@ select tgname from pg_trigger where tgrelid = 'articles'::regclass
 -- Expect: both
 select conname from pg_constraint where conrelid = 'articles'::regclass
   and conname ilike '%content_hash%';
--- Expect at least one CHECK constraint enforcing length(content_hash) = 40
+-- Expect a permissive CHECK accepting lowercase 40-hex (sha1) OR 64-hex
+-- (sha256) OR null — the dual-regime constraint, added NOT VALID.
 
 -- And the worker_metrics view that /api/health depends on:
 select count(*) from worker_metrics;
@@ -108,7 +109,7 @@ select count(*) from worker_metrics;
 
 If any of these return nothing or 404, STOP. Do not proceed to step 4 — `/api/health` will 503 the new Vercel deploy.
 
-Migration 026 is idempotent (gated on the hash regime); re-running it is safe.
+Migration 026 is idempotent (`DROP CONSTRAINT IF EXISTS` before the ADD) and non-destructive; re-running it is safe.
 
 ### 1a. Expose the `pgmq` schema to PostgREST
 
@@ -506,7 +507,7 @@ The first invocation after a long idle (Supabase scales these to zero after ~15 
 
 ### Migration 026 failed mid-run
 
-The migration uses a single transaction and is idempotent (per its header comment). Re-run it. If a row's `content_hash` somehow drifted to an unexpected length, the CHECK constraint at the bottom of the migration will fail; in that case, manually inspect and patch the offending rows before re-running.
+The migration uses a single transaction, is idempotent (per its header comment), and is non-destructive — it adds one permissive `NOT VALID` CHECK and deletes nothing. Re-run it. The `NOT VALID` clause means the ADD does not scan existing rows, so a stray non-hex row cannot fail the ADD; the constraint is enforced only on new writes. If a later INSERT/UPDATE is rejected, inspect and patch the offending value (it must be lowercase hex of length 40 or 64, or null).
 
 ---
 
@@ -574,7 +575,7 @@ If the new system misbehaves and you need to revert to the legacy per-worker scr
 
 3. The legacy per-worker scripts (`scripts/rss-worker.mjs` etc.) are **deleted** from this branch (commit 7d84ece). If you need them back, revert the refactor commit set in git before redeploying Vercel — there is no way to restart them from the post-refactor working tree alone.
 
-4. Migration 026's CHECK constraint stays in place (it's forward-compatible — the legacy worker also writes 40-char sha1 hashes). Migrations 024, 025, 027, and 028 also stay; the new triggers and the `cluster_link_atomic` RPC do no harm with the queues paused and no Edge Function dialling the RPC.
+4. Migration 026's CHECK constraint stays in place. It is permissive and dual-regime by design — it accepts both the legacy worker's 40-char sha1 hashes and the old 64-char sha256 hashes — so it never needs reverting and there is no deleted data to restore (026 deletes nothing). Migrations 024, 025, 027, and 028 also stay; the new triggers and the `cluster_link_atomic` RPC do no harm with the queues paused and no Edge Function dialling the RPC.
 
 5. Steps 1a and 4 need no reversal. `pgmq` can stay in PostgREST's Exposed schemas — the REST surface is bearer-gated (service-role only, per migration 024's grants) and a later roll-forward needs the schema exposed again anyway. `CRON_SECRET` can likewise stay set on Vercel: rolling back the Edge Functions (step 2 above) does not restore the legacy `/api/cron/*` routes, so the variable sits unused by anything except `/api/cron/headline`.
 
