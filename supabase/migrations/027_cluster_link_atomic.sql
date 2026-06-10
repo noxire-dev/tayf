@@ -24,7 +24,7 @@
 begin;
 
 drop function if exists public.cluster_link_atomic(
-  uuid, uuid, jsonb, boolean, text, timestamptz, timestamptz
+  uuid, uuid, jsonb, boolean, text, timestamptz
 );
 
 create function public.cluster_link_atomic(
@@ -33,8 +33,7 @@ create function public.cluster_link_atomic(
   p_bias_distribution jsonb,
   p_is_blindspot boolean,
   p_blindspot_side text,
-  p_first_published timestamptz,
-  p_last_published timestamptz
+  p_first_published timestamptz
 ) returns boolean
 language plpgsql
 security definer
@@ -71,13 +70,18 @@ begin
     from public.cluster_articles
    where cluster_id = p_cluster_id;
 
+  -- updated_at is the consumer-liveness signal: /api/health reads
+  -- MAX(clusters.updated_at) to decide whether the pipeline is alive.
+  -- Stamp it with the wall clock of this write, never the member
+  -- articles' max published_at — a republished old article would
+  -- otherwise make a fresh write look stale.
   update public.clusters
      set article_count   = v_count,
          bias_distribution = p_bias_distribution,
          is_blindspot      = p_is_blindspot,
          blindspot_side    = p_blindspot_side,
          first_published   = p_first_published,
-         updated_at        = p_last_published
+         updated_at        = pg_catalog.now()
    where id = p_cluster_id;
 
   return v_inserted_rows > 0;
@@ -85,22 +89,24 @@ end;
 $$;
 
 comment on function public.cluster_link_atomic(
-  uuid, uuid, jsonb, boolean, text, timestamptz, timestamptz
+  uuid, uuid, jsonb, boolean, text, timestamptz
 ) is
   'Atomic per-cluster cluster_articles insert + clusters recompute. '
   'Serialized via pg_advisory_xact_lock(hashtext(cluster_id::text)). '
   'Returns true if a new link was inserted, false if the article was '
-  'already a member. Round-6 P1 fix for the concurrent cluster-write '
-  'race; see docs/adr/001-worker-stream-system.md and migration 027.';
+  'already a member. Sets clusters.updated_at to now() — the '
+  '/api/health liveness signal — not member published_at. Round-6 P1 '
+  'fix for the concurrent cluster-write race; see '
+  'docs/adr/001-worker-stream-system.md and migration 027.';
 
 -- Service role calls this from the cluster-consumer Edge Function;
 -- no anon / authenticated access is granted (the function reads + writes
 -- gameplay tables that are already revoked from those roles).
 revoke all on function public.cluster_link_atomic(
-  uuid, uuid, jsonb, boolean, text, timestamptz, timestamptz
+  uuid, uuid, jsonb, boolean, text, timestamptz
 ) from public;
 grant execute on function public.cluster_link_atomic(
-  uuid, uuid, jsonb, boolean, text, timestamptz, timestamptz
+  uuid, uuid, jsonb, boolean, text, timestamptz
 ) to service_role;
 
 commit;

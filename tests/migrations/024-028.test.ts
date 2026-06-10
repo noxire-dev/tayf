@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -106,6 +106,26 @@ describe("migration 025_worker_triggers.sql (static)", () => {
     expect(sql).toMatch(/NEW\.image_url\s+is\s+(not\s+)?null/i);
   });
 
+  it("filters at the trigger level via WHEN clauses (cheap predicate before the SECURITY DEFINER call)", () => {
+    // P3-5 fix: without WHEN, both SECURITY DEFINER functions fire for
+    // EVERY insert and bail inside plpgsql. The trigger-level predicates
+    // keep non-matching rows from invoking the functions at all; the
+    // in-function guards stay as belt-and-braces.
+    expect(sql).toMatch(
+      /when\s*\(\s*NEW\.category\s+in\s*\(\s*'politika'\s*,\s*'son_dakika'\s*\)\s*\)/i,
+    );
+    expect(sql).toMatch(/when\s*\(\s*NEW\.image_url\s+is\s+null\s*\)/i);
+  });
+
+  it("pins trigger-function ownership to postgres (deterministic SECURITY DEFINER owner)", () => {
+    // S10 fix: the pgmq.send grant block targets postgres /
+    // supabase_admin specifically, so ownership must be pinned rather
+    // than inherited from whichever role ran the migration. The pin is
+    // wrapped in a role-existence guard for vanilla Postgres.
+    expect(sql).toMatch(/alter\s+function\s+enqueue_cluster_work\(\)\s+owner\s+to\s+postgres/i);
+    expect(sql).toMatch(/alter\s+function\s+enqueue_image_backfill\(\)\s+owner\s+to\s+postgres/i);
+  });
+
   it("is idempotent — drops triggers before recreating", () => {
     expect(sql).toMatch(/drop\s+trigger\s+if\s+exists\s+articles_cluster_enqueue/i);
     expect(sql).toMatch(/drop\s+trigger\s+if\s+exists\s+articles_image_enqueue/i);
@@ -152,8 +172,12 @@ describe("migration 026_unify_content_hash_v2.sql (static)", () => {
     expect(sql).toMatch(/length\(content_hash\)\s*=\s*64/i);
   });
 
-  it("adds a CHECK constraint enforcing 40-char sha1 hashes going forward", () => {
-    expect(sql).toMatch(/check\s*\([^)]*length\(content_hash\)\s*=\s*40/i);
+  it("adds a CHECK constraint enforcing lowercase 40-hex sha1 hashes going forward", () => {
+    // P3-7 fix: the constraint pins content (lowercase hex), not just
+    // length — a 40-char uppercase or non-hex value must also bounce.
+    expect(sql).toMatch(
+      /check\s*\(\s*content_hash\s+is\s+null\s+or\s+content_hash\s*~\s*'\^\[0-9a-f\]\{40\}\$'\s*\)/i,
+    );
   });
 
   it("does NOT drop the UNIQUE constraint on (source_id, content_hash)", () => {
@@ -217,6 +241,16 @@ describe("migration 027_cluster_link_atomic.sql (static)", () => {
     expect(sql).toMatch(/grant\s+execute\s+on\s+function\s+public\.cluster_link_atomic[^;]+to\s+service_role/i);
     expect(sql).not.toMatch(/grant\s+execute\s+on\s+function\s+public\.cluster_link_atomic[^;]+to\s+(anon|authenticated)/i);
   });
+
+  it("stamps clusters.updated_at with now(), not member published_at (liveness signal)", () => {
+    // P3-12 fix: /api/health reads MAX(clusters.updated_at) as the
+    // pipeline-alive signal. Deriving it from the members' max
+    // published_at would make a write triggered by a republished old
+    // article look stale, so the RPC stamps the wall clock instead and
+    // the p_last_published parameter is gone entirely.
+    expect(sql).toMatch(/updated_at\s*=\s*pg_catalog\.now\(\)/i);
+    expect(sql).not.toMatch(/p_last_published/i);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -239,15 +273,55 @@ describe("migration 028_drop_worker_checkpoint.sql (static)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Cross-migration tripwire — the pgmq schema is exposed to PostgREST
+// (supabase/config.toml api.schemas) intentionally, for operator tooling
+// behind service_role. That makes one stray future GRANT on a pgmq object
+// to anon / authenticated / PUBLIC a full queue-API leak, so scan EVERY
+// migration file, present and future.
+// ---------------------------------------------------------------------------
+
+describe("pgmq exposure tripwire (all migrations, static)", () => {
+  it("no migration grants anything on pgmq objects to anon / authenticated / public", () => {
+    const files = readdirSync(MIGRATIONS_DIR)
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+    expect(files.length).toBeGreaterThan(0);
+
+    // Strip `--` line comments first so prose like "we do NOT grant ...
+    // to anon" cannot false-positive, then flag any GRANT span that
+    // mentions pgmq and lists anon / authenticated / PUBLIC after its
+    // to-clause. The legitimate `grant usage on schema pgmq to
+    // service_role` in 024 stays clean — its to-clause names only
+    // service_role.
+    const leak = /grant[^;]*\bpgmq\b[^;]*\bto\b[^;]*\b(anon|authenticated|public)\b/i;
+    const offenders = files.filter((f) => {
+      const sql = read(f)
+        .split("\n")
+        .map((line) => line.replace(/--.*$/, ""))
+        .join("\n");
+      return leak.test(sql);
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  it("sanity: 024's legitimate service_role grant is still present (regex is not vacuous)", () => {
+    expect(read("024_pgmq_setup.sql")).toMatch(
+      /grant\s+usage\s+on\s+schema\s+pgmq\s+to\s+service_role/i,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Live integration checks — opt-in via SUPABASE_LOCAL_URL.
 //
 // These speak Postgres directly. We don't pull in a Supabase JS client here
 // because the wire protocol is simpler — and these tests are about the SQL
-// side, not the JS SDK. We use the `pg` driver if it's available.
+// side, not the JS SDK. We use the `pg` driver.
 //
-// If `pg` isn't installed (it isn't in tayf's package.json today), the live
-// suite skips with an explanatory log. The orchestrator can `npm i -D pg`
-// in Phase 3 if the user wants the live tier active.
+// Opting in is binding: when SUPABASE_LOCAL_URL is set, a missing `pg`
+// driver or an unreachable server FAILS the suite from beforeAll instead of
+// silently no-opping every assertion — a live tier that quietly passes
+// without running is worse than no live tier at all.
 // ---------------------------------------------------------------------------
 
 describe.runIf(LIVE)("migrations 024–026 (live against SUPABASE_LOCAL_URL)", () => {
@@ -256,30 +330,27 @@ describe.runIf(LIVE)("migrations 024–026 (live against SUPABASE_LOCAL_URL)", (
     end: () => Promise<void>;
   };
 
-  let client: PgClient | null = null;
+  let client!: PgClient;
 
   beforeAll(async () => {
-    try {
-      // Dynamic import: don't crash module load on dev boxes that lack `pg`.
-      const pgMod = (await import("pg").catch(() => null)) as
-        | { Client?: new (opts: unknown) => PgClient }
-        | null;
-      if (!pgMod?.Client) {
-        // eslint-disable-next-line no-console
-        console.warn("[migrations] `pg` not installed; live tier skipping.");
-        return;
-      }
-      client = new pgMod.Client({ connectionString: SUPABASE_LOCAL_URL });
-      await (client as unknown as { connect: () => Promise<void> }).connect();
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("[migrations] could not connect to SUPABASE_LOCAL_URL:", err);
-      client = null;
+    // Dynamic import: `pg` is intentionally not a hard dependency, but
+    // once the live tier is opted into it must exist.
+    const pgMod = (await import("pg").catch(() => null)) as
+      | { Client?: new (opts: unknown) => PgClient }
+      | null;
+    if (!pgMod?.Client) {
+      throw new Error(
+        "SUPABASE_LOCAL_URL is set but the 'pg' driver is not installed — " +
+          "run npm i -D pg or unset SUPABASE_LOCAL_URL",
+      );
     }
+    client = new pgMod.Client({ connectionString: SUPABASE_LOCAL_URL });
+    // Deliberately no try/catch: a connection failure (server down,
+    // wrong URL) must fail the suite, not downgrade it to a no-op.
+    await (client as unknown as { connect: () => Promise<void> }).connect();
   });
 
   it("pgmq schema exists and the cluster_work / image_backfill queues are present", async () => {
-    if (!client) return;
     const { rows } = await client.query(
       "select queue_name from pgmq.list_queues() where queue_name in ('cluster_work', 'image_backfill')",
     );
@@ -288,7 +359,6 @@ describe.runIf(LIVE)("migrations 024–026 (live against SUPABASE_LOCAL_URL)", (
   });
 
   it("inserting a politics article enqueues a cluster_work message", async () => {
-    if (!client) return;
     // Snapshot the queue depth, insert one row, snapshot again. The
     // trigger writes synchronously inside the same xact, so the count
     // delta must be exactly 1.
@@ -319,7 +389,6 @@ describe.runIf(LIVE)("migrations 024–026 (live against SUPABASE_LOCAL_URL)", (
   });
 
   it("the content_hash CHECK constraint rejects sha256-length values", async () => {
-    if (!client) return;
     let threw = false;
     try {
       await client.query(

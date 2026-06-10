@@ -9,7 +9,8 @@
 //   1. read up to BATCH_SIZE messages with visibility timeout VT_SECONDS
 //   2. for each message: fetch the article, score against the 48h cluster
 //      context, upsert into clusters/cluster_articles, then `pgmq.archive`
-//   3. messages whose `read_ct` exceeds MAX_READS get `pgmq.delete` (DLQ-lite)
+//   3. messages whose `read_ct` exceeds MAX_READS get `pgmq.archive`d
+//      (DLQ-lite — the payload survives in pgmq.a_cluster_work for audit)
 //   4. cap total wall-clock work at MAX_INVOCATION_MS so we never hit the
 //      Edge Functions 400s limit
 //
@@ -19,8 +20,8 @@
 
 import {
   archive,
-  deleteMessage,
   type PgmqMessage,
+  queueDepth,
   readBatch,
 } from "../_shared/pgmq.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
@@ -50,8 +51,15 @@ import {
 const QUEUE_NAME = "cluster_work";
 const BATCH_SIZE = 50;
 const VT_SECONDS = 60;                      // visibility timeout per message
-const MAX_READS = 3;                        // permanent failure threshold
+// Poison contract (shared with image-consumer): a message is permanently
+// failed once read_ct EXCEEDS this — i.e. on its 4th read.
+const MAX_READS = 3;
 const MAX_INVOCATION_MS = 30_000;           // 30 s wall budget per invocation
+// Minimum budget that must remain before leasing another batch. pgmq bumps
+// read_ct on every read — including messages this invocation never gets to
+// process — so reading with the budget nearly spent walks healthy messages
+// toward the poison threshold (audit S11).
+const READ_BUDGET_FLOOR_MS = 5_000;
 const CLUSTER_CONTEXT_TTL_MS = 60_000;      // refresh rolling-window context
 
 const POLITICS_CATEGORIES = ["politika", "son_dakika"];
@@ -677,10 +685,9 @@ async function addArticleToCluster(
   const firstPublishedIso = timestamps.length
     ? new Date(Math.min(...timestamps)).toISOString()
     : new Date().toISOString();
-  const lastPublishedIso = timestamps.length
-    ? new Date(Math.max(...timestamps)).toISOString()
-    : new Date().toISOString();
 
+  // clusters.updated_at is stamped server-side (now()) inside the RPC —
+  // it is the /api/health liveness signal, not a member-article aggregate.
   const rpcRes = await supabase.rpc("cluster_link_atomic", {
     p_cluster_id: clusterId,
     p_article_id: article.id,
@@ -688,7 +695,6 @@ async function addArticleToCluster(
     p_is_blindspot: is_blindspot,
     p_blindspot_side: blindspot_side,
     p_first_published: firstPublishedIso,
-    p_last_published: lastPublishedIso,
   });
   if (rpcRes.error) {
     throw new Error(`addArticle rpc: ${rpcRes.error.message}`);
@@ -724,7 +730,9 @@ function buildTfidfForArticle(
   return idx;
 }
 
-async function processArticle(articleId: string): Promise<"matched" | "created" | "skipped" | "not-found" | "not-politics"> {
+type ProcessResult = "matched" | "created" | "skipped" | "not-found" | "not-politics";
+
+async function processArticle(articleId: string): Promise<ProcessResult> {
   const artRes = await supabase
     .from("articles")
     .select(
@@ -741,6 +749,19 @@ async function processArticle(articleId: string): Promise<"matched" | "created" 
     return "not-politics";
   }
 
+  try {
+    return await clusterArticle(raw);
+  } catch (err) {
+    // Stamp the article URL onto the error so drainQueue's msg-error log
+    // can include it without re-fetching the row (audit O14).
+    if (err instanceof Error) {
+      (err as Error & { article_url?: string }).article_url = raw.url;
+    }
+    throw err;
+  }
+}
+
+async function clusterArticle(raw: ArticleRow): Promise<ProcessResult> {
   // Idempotency is enforced inside `cluster_link_atomic` via the
   // (cluster_id, article_id) primary key + per-cluster advisory lock:
   // a duplicate INSERT is a no-op but the recompute still runs, which
@@ -907,12 +928,23 @@ async function drainQueue(): Promise<InvocationSummary> {
     budgeted_out: false,
   };
 
+  // Best-effort depth sample for the drain summary log (audit O13).
+  const depthBefore = await queueDepth(supabase, QUEUE_NAME);
+
   // Force-warm cluster context once at the top of the invocation so the
   // per-message path is read-only against the cache (cheap).
   await getClusterContext();
   await getSourceLookup();
 
-  while (Date.now() - startedAt < MAX_INVOCATION_MS) {
+  while (true) {
+    // Lease a new batch only while enough budget remains to actually
+    // process it. pgmq bumps read_ct on every read, so a read that only
+    // ever budget-outs walks a never-attempted message toward the poison
+    // threshold (audit S11).
+    if (Date.now() - startedAt > MAX_INVOCATION_MS - READ_BUDGET_FLOOR_MS) {
+      summary.budgeted_out = true;
+      break;
+    }
     let messages: PgmqMessage<QueueMessage>[];
     try {
       messages = await readBatch<QueueMessage>(
@@ -932,6 +964,10 @@ async function drainQueue(): Promise<InvocationSummary> {
 
     for (const msg of messages) {
       if (Date.now() - startedAt >= MAX_INVOCATION_MS) {
+        // Deadline hit mid-batch: leave the remaining messages untouched —
+        // the visibility timeout returns them to the queue — and keep them
+        // out of the poison accounting; only messages that genuinely
+        // errored during processing reach the read_ct check below.
         summary.budgeted_out = true;
         break;
       }
@@ -972,25 +1008,35 @@ async function drainQueue(): Promise<InvocationSummary> {
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        // read_ct includes the current read, so >= MAX_READS means the
-        // visibility timeout has already retried this message MAX_READS-1
-        // times and it's still failing.
-        if (msg.read_ct >= MAX_READS) {
-          console.error(
-            `[cluster-consumer] permanent failure msg=${msg.msg_id} read_ct=${msg.read_ct} article=${articleId}: ${errMsg}`,
-          );
+        const url =
+          (err as { article_url?: string } | null | undefined)?.article_url ??
+            null;
+        console.error(
+          "[cluster-consumer] msg-error",
+          JSON.stringify({
+            msg_id: msg.msg_id,
+            read_ct: msg.read_ct,
+            article_id: articleId,
+            url,
+            error: errMsg,
+          }),
+        );
+        // Poison contract (shared with image-consumer): read_ct includes
+        // the current read, so > MAX_READS means the visibility timeout
+        // has already retried this message MAX_READS times and it's still
+        // failing.
+        if (msg.read_ct > MAX_READS) {
           try {
-            await deleteMessage(supabase, QUEUE_NAME, msg.msg_id);
-          } catch (delErr) {
+            // Archive — never delete — so the payload survives in
+            // pgmq.a_cluster_work as the poison audit trail (audit S12).
+            await archive(supabase, QUEUE_NAME, msg.msg_id);
+          } catch (archErr) {
             console.warn(
-              `[cluster-consumer] delete of permanent-failure msg ${msg.msg_id} failed: ${delErr instanceof Error ? delErr.message : delErr}`,
+              `[cluster-consumer] archive of permanent-failure msg ${msg.msg_id} failed: ${archErr instanceof Error ? archErr.message : archErr}`,
             );
           }
           summary.failedPermanent += 1;
         } else {
-          console.warn(
-            `[cluster-consumer] transient failure msg=${msg.msg_id} read_ct=${msg.read_ct} article=${articleId}: ${errMsg}`,
-          );
           // Don't archive/delete — let the visibility timeout expire so
           // pgmq.read picks it up again on the next invocation.
           summary.failedTransient += 1;
@@ -1004,6 +1050,13 @@ async function drainQueue(): Promise<InvocationSummary> {
   }
 
   summary.duration_ms = Date.now() - startedAt;
+  const depthAfter = await queueDepth(supabase, QUEUE_NAME);
+  // One JSON-shaped summary line per drain (audit O13) — depth samples are
+  // best-effort and surface as null when the metrics probe fails.
+  console.log(
+    "[cluster-consumer] drain",
+    JSON.stringify({ depth_before: depthBefore, depth_after: depthAfter, ...summary }),
+  );
   return summary;
 }
 

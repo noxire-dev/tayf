@@ -68,8 +68,10 @@
 --   * Section 1 filters `WHERE length(content_hash) = 64`, so a re-run
 --     after the delete has happened touches zero rows.
 --   * Section 2 uses `DROP CONSTRAINT IF EXISTS` before `ADD`. After
---     section 1 every remaining row carries a 40-hex hash, so the ADD
---     succeeds on first run and on every re-run.
+--     section 1 every remaining row carries a lowercase 40-hex hash
+--     (strictFingerprint emits lowercase hex digests; section 1 only
+--     deletes rows, never rewrites them), so the ADD succeeds on first
+--     run and on every re-run.
 --   * Section 3 is a diagnostic and is always safe.
 --
 -- What this migration does NOT do:
@@ -116,10 +118,15 @@ begin
     v_deleted;
 end $$;
 
--- 2) Install the length-40 CHECK constraint ---------------------------------
+-- 2) Install the sha1-format CHECK constraint -------------------------------
 --    Belt-and-braces: even if a future code path tries to write a
---    sha256 (64-char) or any other non-canonical length, the DB rejects
---    it. The constraint also tolerates NULL so it is forward-compatible
+--    sha256 (64-char), an uppercase-hex variant, or any other
+--    non-canonical value, the DB rejects it. The regex pins both length
+--    (40) and content (lowercase hex) — strictFingerprint emits
+--    lowercase hex, so every legitimate hash already satisfies it, and
+--    the ADD below re-validates every existing row, aborting the
+--    transaction if that ever stops being true.
+--    The constraint also tolerates NULL so it is forward-compatible
 --    with a hypothetical future migration that wants to relax NOT NULL
 --    — but in the current schema, `articles.content_hash` is
 --    `text not null` (per `002_create_articles.sql:9`) so the NULL
@@ -130,13 +137,13 @@ alter table articles
 
 alter table articles
   add constraint articles_content_hash_length_chk
-  check (content_hash is null or length(content_hash) = 40);
+  check (content_hash is null or content_hash ~ '^[0-9a-f]{40}$');
 
 -- 3) Diagnostics: confirm the after-state -----------------------------------
 --    Note: by the time this block runs, section 2's ADD CONSTRAINT has
---    already validated every existing row. If any row had a non-{40,
---    null} hash, the ADD would have failed and the transaction would
---    have rolled back before we got here. The counters below are
+--    already validated every existing row. If any row had a hash that
+--    was not lowercase 40-hex (or NULL), the ADD would have failed and
+--    the transaction would have rolled back before we got here. The counters below are
 --    therefore guaranteed to satisfy the invariant — they exist for
 --    observability (operators can grep migration logs for the AFTER
 --    counts) rather than as a safety net.

@@ -36,6 +36,12 @@ begin;
 -- if a role does not exist on a given environment (e.g. a vanilla local
 -- Postgres without the Supabase role bundle), the grant is silently
 -- skipped rather than failing the migration.
+--
+-- Ownership of the two functions is pinned to `postgres` right after each
+-- CREATE FUNCTION below, so "whichever role owns" is deterministic rather
+-- than an accident of which role ran the migration. The dual-role grant
+-- here stays as defence in depth for environments where the pin is
+-- skipped (no `postgres` role).
 do $$
 declare
   fn_oid oid;
@@ -69,6 +75,12 @@ $$;
 -- and the rationale: clustering non-political articles was dead work
 -- that wasted compute and polluted the cluster table).
 --
+-- The category predicate lives in the trigger's WHEN clause, so the
+-- SECURITY DEFINER function is never even invoked for the ~majority of
+-- inserts that fall outside the whitelist — the same check repeated
+-- inside the function body is belt-and-braces in case the trigger is
+-- ever recreated without the WHEN clause.
+--
 -- The whitelist is hardcoded here intentionally — `src/lib/categories.ts`
 -- does not exist in this codebase, and even if it did, a SQL trigger
 -- cannot read a TypeScript module at runtime. If the application-layer
@@ -99,7 +111,8 @@ as $$
 begin
   -- Skip non-politics rows. The whitelist mirrors migration 008's
   -- partial-index predicate so a row that lands in the index also
-  -- lands in the queue, and vice versa.
+  -- lands in the queue, and vice versa. Redundant with the trigger's
+  -- WHEN clause by design (belt-and-braces, see section comment).
   if NEW.category is null or NEW.category not in ('politika', 'son_dakika') then
     return NEW;
   end if;
@@ -113,6 +126,20 @@ begin
 end;
 $$;
 
+-- Deterministic ownership: SECURITY DEFINER executes as the function
+-- owner, and the section-0 pgmq.send grants target `postgres` /
+-- `supabase_admin` specifically — so pin the owner to `postgres` rather
+-- than inheriting whatever role happened to run the migration. Guarded
+-- so a vanilla local Postgres without the role skips the pin instead of
+-- failing the migration.
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'postgres') then
+    alter function enqueue_cluster_work() owner to postgres;
+  end if;
+end
+$$;
+
 comment on function enqueue_cluster_work() is
   'Trigger fn: enqueues a cluster_work message for each newly inserted '
   'politics article. Payload: {article_id: uuid}. See migration 025.';
@@ -120,13 +147,15 @@ comment on function enqueue_cluster_work() is
 create trigger articles_cluster_enqueue
   after insert on articles
   for each row
+  when (NEW.category in ('politika', 'son_dakika'))
   execute function enqueue_cluster_work();
 
 comment on trigger articles_cluster_enqueue on articles is
-  'Fires after INSERT on articles for category in (politika, son_dakika). '
-  'Enqueues a cluster_work message consumed by the cluster-consumer '
-  'Edge Function via pg_cron. Non-politics rows are skipped because '
-  'clustering is scoped to political news (migration 008).';
+  'Fires after INSERT on articles for category in (politika, son_dakika), '
+  'filtered at the trigger level via the WHEN clause so the SECURITY '
+  'DEFINER function never runs for non-politics rows. Enqueues a '
+  'cluster_work message consumed by the cluster-consumer Edge Function '
+  'via pg_cron. Clustering is scoped to political news (migration 008).';
 
 -- ---------------------------------------------------------------------------
 -- 2. image_backfill enqueue
@@ -135,6 +164,11 @@ comment on trigger articles_cluster_enqueue on articles is
 -- `image_url`. The image-consumer Edge Function dequeues these, fetches
 -- the article's HTML, scrapes `og:image` / `twitter:image`, and updates
 -- the row. Validation (SSRF allowlist) is done in the consumer.
+--
+-- As with the cluster trigger above, the image_url predicate lives in
+-- the trigger's WHEN clause so rows that already carry an image never
+-- invoke the SECURITY DEFINER function; the in-function check is kept
+-- as belt-and-braces.
 --
 -- We enqueue on INSERT (not UPDATE) because:
 --   - articles arrive image-less ~24 % of the time across the source mix;
@@ -163,7 +197,8 @@ as $$
 begin
   -- Only enqueue if the new row lacks an image. Rows that already carry
   -- an `image_url` from the RSS feed or the Edge Function's inline
-  -- og:image extraction do not need a backfill pass.
+  -- og:image extraction do not need a backfill pass. Redundant with the
+  -- trigger's WHEN clause by design (belt-and-braces).
   if NEW.image_url is not null then
     return NEW;
   end if;
@@ -177,6 +212,18 @@ begin
 end;
 $$;
 
+-- Deterministic ownership — same rationale as enqueue_cluster_work
+-- above: pin the SECURITY DEFINER owner to `postgres` so the section-0
+-- grant set always covers the executing identity; skip gracefully on
+-- environments without the role.
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'postgres') then
+    alter function enqueue_image_backfill() owner to postgres;
+  end if;
+end
+$$;
+
 comment on function enqueue_image_backfill() is
   'Trigger fn: enqueues an image_backfill message for each newly '
   'inserted article that lacks image_url. Payload: {article_id: uuid}. '
@@ -185,12 +232,15 @@ comment on function enqueue_image_backfill() is
 create trigger articles_image_enqueue
   after insert on articles
   for each row
+  when (NEW.image_url is null)
   execute function enqueue_image_backfill();
 
 comment on trigger articles_image_enqueue on articles is
-  'Fires after INSERT on articles when image_url IS NULL. Enqueues an '
-  'image_backfill message consumed by the image-consumer Edge Function '
-  'via pg_cron. INSERT-only (not UPDATE) to avoid a re-enqueue loop '
-  'when the consumer writes the resolved image back to the row.';
+  'Fires after INSERT on articles when image_url IS NULL, filtered at '
+  'the trigger level via the WHEN clause so rows that already carry an '
+  'image never invoke the function. Enqueues an image_backfill message '
+  'consumed by the image-consumer Edge Function via pg_cron. INSERT-only '
+  '(not UPDATE) to avoid a re-enqueue loop when the consumer writes the '
+  'resolved image back to the row.';
 
 commit;

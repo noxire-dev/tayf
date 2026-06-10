@@ -12,7 +12,8 @@
 // Lifecycle per message:
 //   1. pgmq.read('image_backfill', vt=30, qty=BATCH_SIZE).
 //   2. For each message:
-//      a. If read_ct > MAX_READS → pgmq.delete (permanent failure path).
+//      a. If read_ct > MAX_READS → pgmq.archive (permanent failure path —
+//         the payload survives in pgmq.a_image_backfill for audit).
 //      b. Load the article row; skip if missing or already imaged.
 //      c. Pick the extractor (fetchHeroImage for the three audit-flagged
 //         slugs, fetchOgImage otherwise).
@@ -25,7 +26,7 @@
 import { createServiceClient, type SupabaseClient } from "../_shared/supabase.ts";
 import {
   archive as pgmqArchive,
-  deleteMessage as pgmqDelete,
+  queueDepth as pgmqQueueDepth,
   readBatch as pgmqRead,
   type PgmqMessage,
 } from "../_shared/pgmq.ts";
@@ -51,8 +52,10 @@ const VISIBILITY_TIMEOUT_S = 30;
 // Batch size per pgmq.read call. 20 keeps each invocation cheap while
 // keeping pace with the pg_cron interval (every 5 min).
 const BATCH_SIZE = 20;
-// Per-message permanent-failure cap. After this many reads pgmq.delete is
-// called so the message stops bouncing.
+// Per-message permanent-failure cap. Poison contract (shared with
+// cluster-consumer): once read_ct EXCEEDS this — i.e. on the 4th read —
+// the message is pgmq.archive'd so it stops bouncing while the payload
+// survives in pgmq.a_image_backfill for audit.
 const MAX_READS = 3;
 // Per-row attempt cap. Mirrors scripts/image-worker.mjs / migration 022 so
 // the queue path and the legacy worker agree on parking behaviour.
@@ -61,6 +64,11 @@ const IMG_BACKFILL_PARK_MS = 7 * 24 * 3600 * 1000;
 // Edge Functions hard limit is 400s, but we cap ourselves well under to
 // leave headroom for the pg_cron wrapper + cold-start jitter.
 const WALL_BUDGET_MS = 30_000;
+// Minimum budget that must remain before leasing another batch. pgmq bumps
+// read_ct on every read — including messages this invocation never gets to
+// process — so reading with the budget nearly spent walks healthy messages
+// toward the poison threshold (audit S11).
+const READ_BUDGET_FLOOR_MS = 5_000;
 // Per-fetch HTTP timeout — matches scripts/image-worker.mjs's tuned-down 5s.
 const REQUEST_TIMEOUT_MS = 5000;
 // Slugs that get the extended-window hero-image extractor (audit IMG1).
@@ -143,20 +151,22 @@ async function processMessage(
 ): Promise<Outcome> {
   const articleId = msg.message?.article_id;
 
-  // Malformed enqueue payload → permanent. Delete so we don't keep reading.
+  // Malformed enqueue payload → permanent. Archive so we don't keep
+  // reading while the payload stays inspectable in pgmq.a_image_backfill.
   if (!articleId || typeof articleId !== "string") {
-    console.warn(`[image-consumer] msg ${msg.msg_id} missing article_id — deleting`);
-    await safeArchiveOrDelete(client, msg.msg_id, "delete");
+    console.warn(`[image-consumer] msg ${msg.msg_id} missing article_id — archiving`);
+    await safeArchive(client, msg.msg_id);
     return "permanent-failure";
   }
 
-  // > MAX_READS reads → permanent. Delete; the article row's
-  // image_backfill_attempts carries the audit trail.
+  // read_ct > MAX_READS → permanent (shared poison contract with
+  // cluster-consumer). Archive — never delete — so the message body
+  // survives in pgmq.a_image_backfill as the audit trail (audit S12).
   if (msg.read_ct > MAX_READS) {
     console.warn(
-      `[image-consumer] msg ${msg.msg_id} (article=${articleId}) exceeded ${MAX_READS} reads — deleting`,
+      `[image-consumer] msg ${msg.msg_id} (article=${articleId}) exceeded ${MAX_READS} reads — archiving`,
     );
-    await safeArchiveOrDelete(client, msg.msg_id, "delete");
+    await safeArchive(client, msg.msg_id);
     return "permanent-failure";
   }
 
@@ -168,7 +178,17 @@ async function processMessage(
     .maybeSingle<ArticleRow>();
 
   if (loadErr) {
-    console.error(`[image-consumer] article ${articleId} load failed: ${loadErr.message}`);
+    // URL is unknown here — the row never loaded.
+    console.error(
+      "[image-consumer] msg-error",
+      JSON.stringify({
+        msg_id: msg.msg_id,
+        read_ct: msg.read_ct,
+        article_id: articleId,
+        url: null,
+        error: loadErr.message,
+      }),
+    );
     // Transient — leave the message visible for the next read.
     return "errored";
   }
@@ -177,18 +197,18 @@ async function processMessage(
     console.warn(
       `[image-consumer] article ${articleId} not found — archiving msg ${msg.msg_id}`,
     );
-    await safeArchiveOrDelete(client, msg.msg_id, "archive");
+    await safeArchive(client, msg.msg_id);
     return "skipped-missing";
   }
 
   if (article.image_url) {
     // Already backfilled (race / re-enqueue); archive and move on.
-    await safeArchiveOrDelete(client, msg.msg_id, "archive");
+    await safeArchive(client, msg.msg_id);
     return "skipped-already-imaged";
   }
 
   if (!article.url) {
-    await safeArchiveOrDelete(client, msg.msg_id, "archive");
+    await safeArchive(client, msg.msg_id);
     return "skipped-no-url";
   }
 
@@ -207,36 +227,72 @@ async function processMessage(
     // fetchOgImage / fetchHeroImage are contracted not to throw; this is
     // defensive. Any throw collapses to errored.
     const m = err instanceof Error ? err.message : String(err);
-    console.error(`[image-consumer] fetcher threw for ${article.id}: ${m}`);
+    console.error(
+      "[image-consumer] msg-error",
+      JSON.stringify({
+        msg_id: msg.msg_id,
+        read_ct: msg.read_ct,
+        article_id: article.id,
+        url: article.url,
+        error: m,
+      }),
+    );
     await bumpAttempt(client, article);
-    await safeArchiveOrDelete(client, msg.msg_id, "archive");
+    await safeArchive(client, msg.msg_id);
     return "errored";
   }
 
   if (!ogImage || !isValidImageUrl(ogImage)) {
     await bumpAttempt(client, article);
-    await safeArchiveOrDelete(client, msg.msg_id, "archive");
+    await safeArchive(client, msg.msg_id);
     return "not-found";
   }
 
   // Successful fetch. Single update sets image_url, resets attempts, and
-  // bumps attempted_at.
-  const { error: updateErr } = await client
+  // bumps attempted_at. Conditional on image_url still being NULL so two
+  // concurrent drains can't both write — the loser matches zero rows and
+  // records the race as a skip, not an error (audit P3-10).
+  const { data: updatedRows, error: updateErr } = await client
     .from("articles")
     .update({
       image_url: ogImage,
       image_backfill_attempted_at: new Date().toISOString(),
       image_backfill_attempts: 0,
     })
-    .eq("id", article.id);
+    .eq("id", article.id)
+    .is("image_url", null)
+    .select("id");
 
   if (updateErr) {
-    console.error(`[image-consumer] update failed for ${article.id}: ${updateErr.message}`);
+    console.error(
+      "[image-consumer] msg-error",
+      JSON.stringify({
+        msg_id: msg.msg_id,
+        read_ct: msg.read_ct,
+        article_id: article.id,
+        url: article.url,
+        error: updateErr.message,
+      }),
+    );
     // Leave the message visible so the next read retries.
     return "errored";
   }
 
-  await safeArchiveOrDelete(client, msg.msg_id, "archive");
+  const matched = Array.isArray(updatedRows)
+    ? updatedRows.length
+    : updatedRows
+    ? 1
+    : 0;
+  if (matched === 0) {
+    // A concurrent drain wrote image_url between our load and this update.
+    console.log(
+      `[image-consumer] article ${article.id} already imaged by a concurrent drain — skipping msg ${msg.msg_id}`,
+    );
+    await safeArchive(client, msg.msg_id);
+    return "skipped-already-imaged";
+  }
+
+  await safeArchive(client, msg.msg_id);
   return "found";
 }
 
@@ -270,20 +326,20 @@ async function bumpAttempt(
 }
 
 /**
- * Wrap pgmq.archive / pgmq.delete so a transient RPC failure doesn't abort
- * the whole drain. The pgmq helpers throw on error; we log and move on.
+ * Wrap pgmq.archive so a transient RPC failure doesn't abort the whole
+ * drain. The pgmq helper throws on error; we log and move on. Archive is
+ * the only removal path — poison messages are archived too (audit S12) so
+ * the payload survives in pgmq.a_image_backfill.
  */
-async function safeArchiveOrDelete(
+async function safeArchive(
   client: SupabaseClient,
   msgId: number,
-  mode: "archive" | "delete",
 ): Promise<void> {
   try {
-    if (mode === "archive") await pgmqArchive(client, QUEUE_NAME, msgId);
-    else await pgmqDelete(client, QUEUE_NAME, msgId);
+    await pgmqArchive(client, QUEUE_NAME, msgId);
   } catch (err) {
     const m = err instanceof Error ? err.message : String(err);
-    console.error(`[image-consumer] pgmq ${mode}(${msgId}) failed: ${m}`);
+    console.error(`[image-consumer] pgmq archive(${msgId}) failed: ${m}`);
   }
 }
 
@@ -310,7 +366,14 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
   let skipped = 0;
   let permanentFailures = 0;
 
-  while (Date.now() - startedAt < WALL_BUDGET_MS) {
+  // Best-effort depth sample for the drain summary log (audit O13).
+  const depthBefore = await pgmqQueueDepth(client, QUEUE_NAME);
+
+  // Lease a new batch only while enough budget remains to actually process
+  // it — pgmq bumps read_ct on every read, so a read that only ever
+  // budget-outs walks a never-attempted message toward the poison
+  // threshold (audit S11).
+  while (Date.now() - startedAt < WALL_BUDGET_MS - READ_BUDGET_FLOOR_MS) {
     let batch: PgmqMessage<ImageJob>[] = [];
     try {
       batch = await pgmqRead<ImageJob>(client, QUEUE_NAME, VISIBILITY_TIMEOUT_S, BATCH_SIZE);
@@ -324,13 +387,27 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
     // Serial within an invocation: predictable resource footprint, plays
     // nicely with the legacy worker which runs IMG_CONCURRENCY=5 in parallel.
     for (const msg of batch) {
+      // Deadline hit mid-batch: leave the remaining messages untouched —
+      // the visibility timeout returns them to the queue — so they never
+      // count toward the read_ct-based poison check.
       if (Date.now() - startedAt >= WALL_BUDGET_MS) break;
       let outcome: Outcome;
       try {
         outcome = await processMessage(client, msg);
       } catch (err) {
         const m = err instanceof Error ? err.message : String(err);
-        console.error(`[image-consumer] processMessage threw for msg ${msg.msg_id}: ${m}`);
+        console.error(
+          "[image-consumer] msg-error",
+          JSON.stringify({
+            msg_id: msg.msg_id,
+            read_ct: msg.read_ct,
+            article_id: msg.message?.article_id ?? null,
+            url:
+              (err as { article_url?: string } | null | undefined)
+                ?.article_url ?? null,
+            error: m,
+          }),
+        );
         outcome = "errored";
       }
       drained += 1;
@@ -356,7 +433,7 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
     }
   }
 
-  return {
+  const summary: DrainSummary = {
     drained,
     found,
     notFound,
@@ -365,6 +442,14 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
     permanentFailures,
     elapsedMs: Date.now() - startedAt,
   };
+  const depthAfter = await pgmqQueueDepth(client, QUEUE_NAME);
+  // One JSON-shaped summary line per drain (audit O13) — depth samples are
+  // best-effort and surface as null when the metrics probe fails.
+  console.log(
+    "[image-consumer] drain",
+    JSON.stringify({ depth_before: depthBefore, depth_after: depthAfter, ...summary }),
+  );
+  return summary;
 }
 
 // ---------------------------------------------------------------------------
@@ -400,10 +485,8 @@ Deno.serve(withSentry("image-consumer", async (req: Request) => {
   }
 
   try {
+    // drain() emits its own JSON-shaped summary log line (audit O13).
     const summary = await drain(supabase);
-    console.log(
-      `[image-consumer] drain → ${summary.found} found / ${summary.notFound} not-found / ${summary.errored} errored / ${summary.skipped} skipped / ${summary.permanentFailures} pf in ${summary.elapsedMs}ms (drained=${summary.drained})`,
-    );
     return new Response(JSON.stringify(summary), {
       headers: { "content-type": "application/json" },
     });

@@ -63,7 +63,9 @@ export async function archive(
 
 /**
  * Permanently deletes a message from the queue WITHOUT archiving.
- * Used on permanent failure (read_ct > MAX_READS).
+ * Operational escape hatch only — the consumers archive poison messages
+ * (audit S12) so the payload survives in `pgmq.a_<queue>` as the audit
+ * trail; nothing in the drain paths deletes anymore.
  */
 export async function deleteMessage(
   client: SupabaseClient,
@@ -77,6 +79,26 @@ export async function deleteMessage(
   if (error) {
     throw new Error(`pgmq.delete(${queue}, ${msgId}): ${error.message}`);
   }
+}
+
+/**
+ * Best-effort queue depth probe via `pgmq.metrics` (granted to
+ * service_role in migration 024). Returns null on any failure — depth
+ * sampling is observability garnish and must never fail a drain.
+ */
+export async function queueDepth(
+  client: SupabaseClient,
+  queue: string,
+): Promise<number | null> {
+  const { data, error } = await client.schema("pgmq").rpc("metrics", {
+    queue_name: queue,
+  });
+  if (error) return null;
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { queue_length?: number }
+    | null;
+  const len = row?.queue_length;
+  return typeof len === "number" ? len : null;
 }
 
 /**

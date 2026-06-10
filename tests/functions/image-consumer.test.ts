@@ -10,8 +10,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // instance-metadata host that is the canonical SSRF target.
 //
 // We also cover the happy path (public CDN image makes it to the row),
-// poison messages (read_ct > 3 → permanent delete), and the visibility-
-// timeout / batch-size contract that pg_cron relies on.
+// poison messages (read_ct > 3 → archived, never deleted, so the payload
+// survives in pgmq.a_image_backfill), and the visibility-timeout /
+// batch-size contract that pg_cron relies on.
 //
 // All collaborators are mocked. No network. No Supabase. No DNS.
 // ---------------------------------------------------------------------------
@@ -59,7 +60,8 @@ function resetPgmqState() {
 }
 
 // Names mirror the real `_shared/pgmq.ts` exports (`readBatch`, `archive`,
-// `deleteMessage`, `send`); any drift means the SUT silently sees undefined.
+// `deleteMessage`, `send`, `queueDepth`); any drift means the SUT silently
+// sees undefined.
 //
 // Signatures take the Supabase client as the leading positional arg —
 // matching the real module's `readBatch(client, queue, vt, qty)` etc. —
@@ -87,6 +89,9 @@ vi.mock("../../supabase/functions/_shared/pgmq.ts", () => ({
   ),
   send: vi.fn(
     async (_client: unknown, _queue: string, _payload: unknown) => 1,
+  ),
+  queueDepth: vi.fn(
+    async (_client: unknown, _queue: string) => pgmqState.pending.length,
   ),
 }));
 
@@ -549,7 +554,7 @@ describe("image-consumer Edge Function", () => {
     }
   });
 
-  it("permanently deletes messages with read_ct > 3 (poison)", async () => {
+  it("archives (never deletes) messages with read_ct > 3 (poison)", async () => {
     const handler = await importHandler();
     expect(handler).toBeDefined();
     if (!handler) throw new Error("unreachable: handler tripwire above must throw");
@@ -559,8 +564,12 @@ describe("image-consumer Edge Function", () => {
     ];
     // No fakeArticles["ghost"] → fetch will 404 / article lookup misses.
 
+    // Poison messages are pgmq.archive'd — the body survives in the
+    // pgmq.a_image_backfill archive table as the audit trail — and must
+    // never be pgmq.delete'd (audit S12).
     await handler(authedRequest("http://localhost/image-consumer", { method: "POST" }));
-    expect(pgmqState.deleted).toContain(200);
+    expect(pgmqState.archived).toContain(200);
+    expect(pgmqState.deleted).not.toContain(200);
   });
 
   it("returns 200 on empty queue (no work is not an error)", async () => {

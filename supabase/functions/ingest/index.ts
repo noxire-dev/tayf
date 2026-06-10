@@ -18,8 +18,10 @@
 //
 // Wall-clock budget: 60 s (the Edge Functions hard ceiling is 400 s). We
 // stay well under because the 16-way pool keeps the slowest tail fetch
-// from blocking the cycle. On per-source failure we just log and move on;
-// transient outlet outages must not poison the cycle.
+// from blocking the cycle, and the fetch pool stops 10 s early so rows
+// that were fetched and normalized always get a write window. On
+// per-source failure we just log and move on; transient outlet outages
+// must not poison the cycle.
 
 import { fetchFeed } from "../_shared/rss/fetcher.ts";
 import type { RssSource } from "../_shared/rss/fetcher.ts";
@@ -40,8 +42,13 @@ const FETCH_CONCURRENCY = 16;
 const UPSERT_BATCH = 500;
 // Wall-clock safety. Edge Functions allow ≤400 s; we cap well below so a
 // pathological tail can't push us past the slot. The Vercel cron retries
-// every 3 min so partial progress is harmless.
+// every 3 min so partial progress is harmless. The fetch pool gets the
+// tighter FETCH_DEADLINE_MS so rows that were fetched and normalized
+// always have at least a 10 s write window — without the reserve, a
+// deadline elapsing mid-fetch dropped every assembled row on the floor
+// (audit S13).
 const CYCLE_DEADLINE_MS = 60_000;
+const FETCH_DEADLINE_MS = CYCLE_DEADLINE_MS - 10_000;
 
 // ---------------------------------------------------------------------------
 // In-instance caches
@@ -102,12 +109,16 @@ interface CycleStats {
   notModified: number;
   itemsNormalized: number;
   inserted: number;
+  rowErrors: number;
   durationMs: number;
 }
 
 async function runCycle(): Promise<CycleStats> {
   const startedAt = Date.now();
   const deadline = startedAt + CYCLE_DEADLINE_MS;
+  // The fetch pool stops FETCH_DEADLINE_MS in so the upsert loop below
+  // always has at least a 10 s write window against the full deadline.
+  const fetchDeadline = startedAt + FETCH_DEADLINE_MS;
   const supabase = createServiceClient();
 
   const stats: CycleStats = {
@@ -117,6 +128,7 @@ async function runCycle(): Promise<CycleStats> {
     notModified: 0,
     itemsNormalized: 0,
     inserted: 0,
+    rowErrors: 0,
     durationMs: 0,
   };
 
@@ -173,7 +185,7 @@ async function runCycle(): Promise<CycleStats> {
         allRows.push(row);
       }
     },
-    deadline,
+    fetchDeadline,
   );
 
   // Single batched upsert at cycle end. `ignoreDuplicates: true` against the
@@ -200,7 +212,20 @@ async function runCycle(): Promise<CycleStats> {
             .from("articles")
             .upsert([row], { onConflict: "url", ignoreDuplicates: true })
             .select("id");
-          if (oneErr) continue;
+          if (oneErr) {
+            // Surface the real per-row failure (schema drift, constraint
+            // violations) instead of swallowing it — and count it so the
+            // cycle response reports the loss (audit P3-9).
+            stats.rowErrors++;
+            console.error(
+              `[ingest] row upsert failed: ${JSON.stringify({
+                url: row.url,
+                source_id: row.source_id,
+                error: oneErr.message,
+              })}`,
+            );
+            continue;
+          }
           stats.inserted += one?.length ?? 0;
         }
       } else {

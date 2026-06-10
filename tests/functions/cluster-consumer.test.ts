@@ -13,8 +13,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 //      `pgmq.delete`, Supabase client) at the import boundary so the unit
 //      under test exercises real control flow without any I/O.
 //   3. Asserting observable post-conditions: dequeued message count,
-//      archive-on-success / delete-on-permanent-failure, idempotent re-runs,
-//      and the 30 s per-invocation cap.
+//      archive-on-success / archive-on-permanent-failure (poison messages
+//      are archived, never deleted, so the payload survives in
+//      pgmq.a_cluster_work), idempotent re-runs, and the 30 s
+//      per-invocation cap.
 //
 // The sister builder (B3) owns the module under test. If B3 changes the
 // import path or the named exports, the `vi.mock` targets here need to be
@@ -73,8 +75,9 @@ function resetPgmqState() {
 
 // Mock the shared pgmq wrapper. The exported names here MUST match the
 // real module's named exports (`readBatch`, `archive`, `deleteMessage`,
-// `send`) — otherwise vitest hoists a vi.mock with stale identifiers and
-// the SUT silently sees `undefined` for its imported helpers.
+// `send`, `queueDepth`) — otherwise vitest hoists a vi.mock with stale
+// identifiers and the SUT silently sees `undefined` for its imported
+// helpers.
 //
 // The real signatures all take the Supabase client as the FIRST positional
 // arg (e.g. `readBatch(client, queue, vt, qty)`); the mock signatures
@@ -102,6 +105,9 @@ vi.mock("../../supabase/functions/_shared/pgmq.ts", () => ({
   ),
   send: vi.fn(
     async (_client: unknown, _queue: string, _payload: unknown) => 1,
+  ),
+  queueDepth: vi.fn(
+    async (_client: unknown, _queue: string) => pgmqState.pending.length,
   ),
 }));
 
@@ -276,8 +282,9 @@ describe("cluster-consumer Edge Function", () => {
     };
 
     await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
-    // Either archived (happy path) or deleted (poison) — the contract is that
-    // the message is REMOVED from the live queue, never left to re-deliver.
+    // Archived on success (and poison messages archive too) — the contract
+    // is that the message is REMOVED from the live queue, never left to
+    // re-deliver.
     const removed = [...pgmqState.archived, ...pgmqState.deleted];
     expect(removed).toContain(10);
     // Tripwire (R4-P3): the shared chainable Supabase fake observed at least
@@ -294,7 +301,7 @@ describe("cluster-consumer Edge Function", () => {
     expect(clusterWrites).toBeGreaterThan(0);
   });
 
-  it("permanently deletes messages with read_ct > 3 (poison handling)", async () => {
+  it("archives (never deletes) messages with read_ct > 3 (poison handling)", async () => {
     const handler = await importHandler();
     expect(handler).toBeDefined();
     if (!handler) throw new Error("unreachable: handler tripwire above must throw");
@@ -304,14 +311,15 @@ describe("cluster-consumer Edge Function", () => {
     ];
     // No fakeArticles["ghost"] → article fetch returns null → processArticle
     // returns "not-found" gracefully, the outer loop archives the message
-    // (no exception → no permanent-delete branch). The contract being
-    // verified here is that the message is REMOVED from the live queue —
-    // never left to re-deliver — regardless of which branch handled it.
+    // (no exception → no permanent-failure branch). The contract being
+    // verified here is that the message is moved out of the live queue via
+    // pgmq.archive — never deleted (the archive table is the audit trail)
+    // and never left to re-deliver — regardless of which branch handled it.
     // A poison-classification subtest is owned by the integration-side
     // pgmq harness (B10), not by this contract suite.
     await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
-    const removed = [...pgmqState.archived, ...pgmqState.deleted];
-    expect(removed).toContain(99);
+    expect(pgmqState.archived).toContain(99);
+    expect(pgmqState.deleted).not.toContain(99);
   });
 
   it("returns within the per-invocation 30 s cap (smoke)", async () => {
