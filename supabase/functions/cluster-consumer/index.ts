@@ -216,36 +216,6 @@ function buildMemberIndicesFromRows(
   return { byFingerprint, byEntity };
 }
 
-// ---------------------------------------------------------------------------
-// Paged select helper — works around PostgREST's 1000-row default cap.
-// ---------------------------------------------------------------------------
-
-async function pagedSelect<R>(
-  table: string,
-  select: string,
-  filter: ((q: unknown) => unknown) | null = null,
-  pageSize = 1000,
-): Promise<R[]> {
-  const out: R[] = [];
-  let offset = 0;
-  while (true) {
-    let q = supabase.from(table).select(select) as unknown as {
-      range(from: number, to: number): Promise<{ data: R[] | null; error: { message: string } | null }>;
-    };
-    if (filter) q = filter(q) as typeof q;
-    const res = await q.range(offset, offset + pageSize - 1);
-    if (res.error) {
-      throw new Error(`pagedSelect(${table}): ${res.error.message}`);
-    }
-    const rows = (res.data ?? []) as R[];
-    out.push(...rows);
-    if (rows.length < pageSize) break;
-    offset += pageSize;
-    if (offset > 1_000_000) break;
-  }
-  return out;
-}
-
 async function inChunked<R>(
   table: string,
   select: string,

@@ -35,11 +35,18 @@
 //     is required — `supabase functions deploy` resolves npm: specifiers at
 //     bundle time.
 
+// Minimal surface of the @sentry/deno SDK we actually call. The full SDK
+// type is broad and version-volatile; typing only `init` + `captureException`
+// keeps the dynamic import honest without dragging in the whole shape.
+interface SentryModule {
+  init(opts: Record<string, unknown>): void;
+  captureException(err: unknown, opts?: Record<string, unknown>): void;
+}
+
 // Deno's npm: compatibility layer. The Sentry Deno SDK ships as a standard
 // npm package; the `?dts` query hint is unnecessary because Sentry ships its
 // own .d.ts. See https://deno.com/manual/node/npm_specifiers.
-// deno-lint-ignore no-explicit-any
-let Sentry: any = null;
+let Sentry: SentryModule | null = null;
 
 /**
  * Initialise Sentry for this Edge Function instance.
@@ -57,7 +64,7 @@ export async function initSentry(functionName: string): Promise<void> {
     // Dynamic import so the module load doesn't blow up if @sentry/deno is
     // unavailable for any reason — graceful degradation matters more than
     // strict Sentry coverage on every cold start.
-    const mod = await import("npm:@sentry/deno");
+    const mod = (await import("npm:@sentry/deno")) as unknown as SentryModule;
     mod.init({
       dsn,
       // Edge Functions are short-lived; tracing adds latency without much

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Direct coverage for supabase/functions/_shared/safe-fetch.ts (audit T3 P1-5).
