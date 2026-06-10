@@ -81,24 +81,35 @@ export async function deleteMessage(
   }
 }
 
+export interface QueueDepth {
+  depth: number | null;
+  oldest_msg_age_sec: number | null;
+}
+
 /**
  * Best-effort queue depth probe via `pgmq.metrics` (granted to
- * service_role in migration 024). Returns null on any failure — depth
- * sampling is observability garnish and must never fail a drain.
+ * service_role in migration 024). Surfaces both `queue_length` (as `depth`)
+ * and `oldest_msg_age_sec` so the drain summary can report queue backlog age
+ * alongside size. Each field falls back to null independently on any failure —
+ * depth sampling is observability garnish and must never fail a drain.
  */
 export async function queueDepth(
   client: SupabaseClient,
   queue: string,
-): Promise<number | null> {
+): Promise<QueueDepth> {
   const { data, error } = await client.schema("pgmq").rpc("metrics", {
     queue_name: queue,
   });
-  if (error) return null;
+  if (error) return { depth: null, oldest_msg_age_sec: null };
   const row = (Array.isArray(data) ? data[0] : data) as
-    | { queue_length?: number }
+    | { queue_length?: number; oldest_msg_age_sec?: number }
     | null;
   const len = row?.queue_length;
-  return typeof len === "number" ? len : null;
+  const oldest = row?.oldest_msg_age_sec;
+  return {
+    depth: typeof len === "number" ? len : null,
+    oldest_msg_age_sec: typeof oldest === "number" ? oldest : null,
+  };
 }
 
 /**

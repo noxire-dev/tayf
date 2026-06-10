@@ -146,6 +146,7 @@ async function runCycle(): Promise<CycleStats> {
   stats.sources = liveSources.length;
   if (liveSources.length === 0) {
     stats.durationMs = Date.now() - startedAt;
+    console.log("[ingest] cycle", JSON.stringify({ ...stats }));
     return stats;
   }
 
@@ -235,6 +236,9 @@ async function runCycle(): Promise<CycleStats> {
   }
 
   stats.durationMs = Date.now() - startedAt;
+  // One JSON-shaped summary line per cycle so cron runs are diagnosable from
+  // the Edge Function logs alone (audit O13).
+  console.log("[ingest] cycle", JSON.stringify({ ...stats }));
   return stats;
 }
 

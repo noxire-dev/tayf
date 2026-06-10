@@ -91,7 +91,10 @@ vi.mock("../../supabase/functions/_shared/pgmq.ts", () => ({
     async (_client: unknown, _queue: string, _payload: unknown) => 1,
   ),
   queueDepth: vi.fn(
-    async (_client: unknown, _queue: string) => pgmqState.pending.length,
+    async (_client: unknown, _queue: string) => ({
+      depth: pgmqState.pending.length,
+      oldest_msg_age_sec: null,
+    }),
   ),
 }));
 

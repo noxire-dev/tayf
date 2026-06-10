@@ -929,7 +929,7 @@ async function drainQueue(): Promise<InvocationSummary> {
   };
 
   // Best-effort depth sample for the drain summary log (audit O13).
-  const depthBefore = await queueDepth(supabase, QUEUE_NAME);
+  const before = await queueDepth(supabase, QUEUE_NAME);
 
   // Force-warm cluster context once at the top of the invocation so the
   // per-message path is read-only against the cache (cheap).
@@ -1050,12 +1050,18 @@ async function drainQueue(): Promise<InvocationSummary> {
   }
 
   summary.duration_ms = Date.now() - startedAt;
-  const depthAfter = await queueDepth(supabase, QUEUE_NAME);
-  // One JSON-shaped summary line per drain (audit O13) — depth samples are
-  // best-effort and surface as null when the metrics probe fails.
+  const after = await queueDepth(supabase, QUEUE_NAME);
+  // One JSON-shaped summary line per drain (audit O13) — depth + oldest-age
+  // samples are best-effort and surface as null when the metrics probe fails.
   console.log(
     "[cluster-consumer] drain",
-    JSON.stringify({ depth_before: depthBefore, depth_after: depthAfter, ...summary }),
+    JSON.stringify({
+      depth_before: before.depth,
+      depth_after: after.depth,
+      oldest_age_before_s: before.oldest_msg_age_sec,
+      oldest_age_after_s: after.oldest_msg_age_sec,
+      ...summary,
+    }),
   );
   return summary;
 }

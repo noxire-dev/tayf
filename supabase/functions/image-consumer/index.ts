@@ -367,7 +367,7 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
   let permanentFailures = 0;
 
   // Best-effort depth sample for the drain summary log (audit O13).
-  const depthBefore = await pgmqQueueDepth(client, QUEUE_NAME);
+  const before = await pgmqQueueDepth(client, QUEUE_NAME);
 
   // Lease a new batch only while enough budget remains to actually process
   // it — pgmq bumps read_ct on every read, so a read that only ever
@@ -442,12 +442,18 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
     permanentFailures,
     elapsedMs: Date.now() - startedAt,
   };
-  const depthAfter = await pgmqQueueDepth(client, QUEUE_NAME);
-  // One JSON-shaped summary line per drain (audit O13) — depth samples are
-  // best-effort and surface as null when the metrics probe fails.
+  const after = await pgmqQueueDepth(client, QUEUE_NAME);
+  // One JSON-shaped summary line per drain (audit O13) — depth + oldest-age
+  // samples are best-effort and surface as null when the metrics probe fails.
   console.log(
     "[image-consumer] drain",
-    JSON.stringify({ depth_before: depthBefore, depth_after: depthAfter, ...summary }),
+    JSON.stringify({
+      depth_before: before.depth,
+      depth_after: after.depth,
+      oldest_age_before_s: before.oldest_msg_age_sec,
+      oldest_age_after_s: after.oldest_msg_age_sec,
+      ...summary,
+    }),
   );
   return summary;
 }
