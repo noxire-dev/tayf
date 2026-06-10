@@ -1,9 +1,11 @@
 // supabase/functions/_shared/pgmq.ts
 //
-// Thin RPC wrapper over the `pgmq` extension functions. Migration 024 grants
-// service-role EXECUTE on `pgmq.send / read / delete / archive` and the
-// service-role client routes through PostgREST so we expose them as
-// `client.schema('pgmq').rpc('<fn>', args)`.
+// Thin RPC wrapper over the `pgmq` extension functions. The service-role
+// client routes through PostgREST, which only sees the `public` schema —
+// `pgmq` is deliberately NOT exposed (Round-6 audit). So we call public
+// SECURITY DEFINER shims (`public.pgmq_*`, migration 029) that proxy to the
+// real `pgmq.*` functions; EXECUTE on the shims is granted to service_role
+// only. Arg names below match the shim parameter names.
 //
 // pgmq's row shape (from `pgmq.read`):
 //   msg_id      bigint
@@ -32,7 +34,7 @@ export async function readBatch<T = unknown>(
   vt = 60,
   qty = 50,
 ): Promise<PgmqMessage<T>[]> {
-  const { data, error } = await client.schema("pgmq").rpc("read", {
+  const { data, error } = await client.rpc("pgmq_read_msgs", {
     queue_name: queue,
     vt,
     qty,
@@ -52,7 +54,7 @@ export async function archive(
   queue: string,
   msgId: number,
 ): Promise<void> {
-  const { error } = await client.schema("pgmq").rpc("archive", {
+  const { error } = await client.rpc("pgmq_archive_msg", {
     queue_name: queue,
     msg_id: msgId,
   });
@@ -72,7 +74,7 @@ export async function deleteMessage(
   queue: string,
   msgId: number,
 ): Promise<void> {
-  const { error } = await client.schema("pgmq").rpc("delete", {
+  const { error } = await client.rpc("pgmq_delete_msg", {
     queue_name: queue,
     msg_id: msgId,
   });
@@ -97,7 +99,7 @@ export async function queueDepth(
   client: SupabaseClient,
   queue: string,
 ): Promise<QueueDepth> {
-  const { data, error } = await client.schema("pgmq").rpc("metrics", {
+  const { data, error } = await client.rpc("pgmq_metrics_one", {
     queue_name: queue,
   });
   if (error) return { depth: null, oldest_msg_age_sec: null };
@@ -120,7 +122,7 @@ export async function send(
   queue: string,
   payload: unknown,
 ): Promise<number> {
-  const { data, error } = await client.schema("pgmq").rpc("send", {
+  const { data, error } = await client.rpc("pgmq_send_msg", {
     queue_name: queue,
     message: payload,
   });

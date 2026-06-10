@@ -59,8 +59,18 @@ function constantTimeEqual(a: string, b: string): boolean {
  * valid bearer.
  */
 export function requireServiceRoleBearer(req: Request): Response | null {
-  const expected = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-  if (expected.length === 0) {
+  // Two accepted bearers, both constant-time compared:
+  //   1. SUPABASE_SERVICE_ROLE_KEY — auto-injected by the runtime. On
+  //      projects using the new API-key system this is the (reveal-once,
+  //      otherwise-unretrievable) `sb_secret_*` key.
+  //   2. WORKER_CRON_SECRET — an operator-set secret used by the pg_cron
+  //      drains, which cannot read the runtime's injected service key. The
+  //      same value lives in Supabase Vault and is sent by the cron's
+  //      net.http_post Authorization header. This is the path the
+  //      worker-stream pipeline actually uses to invoke the drains.
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+  const cronSecret = Deno.env.get("WORKER_CRON_SECRET") ?? "";
+  if (serviceKey.length === 0 && cronSecret.length === 0) {
     return unauthorized("server-misconfigured");
   }
 
@@ -77,7 +87,9 @@ export function requireServiceRoleBearer(req: Request): Response | null {
   }
   const presented = match[1] ?? "";
 
-  if (!constantTimeEqual(presented, expected)) {
+  const okService = serviceKey.length > 0 && constantTimeEqual(presented, serviceKey);
+  const okCron = cronSecret.length > 0 && constantTimeEqual(presented, cronSecret);
+  if (!okService && !okCron) {
     return unauthorized("bad-bearer");
   }
   return null;
