@@ -122,7 +122,7 @@ Full design rationale, alternatives, and consequences in [`adr/001-worker-stream
 The full checklist is [`migration-guide.md`](migration-guide.md); the ordered TL;DR:
 
 1. Snapshot the production database.
-2. `supabase db push` to apply migrations 024 → 025 → 026.
+2. `supabase db push` to apply migrations 024 → 025 → 026 → 027 → 028.
 3. `supabase functions deploy ingest cluster-consumer image-consumer` with `SENTRY_DSN`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and the `app.service_role_key` Postgres GUC configured.
 4. Install three pg_cron jobs: `ingest-drain` (`*/3 * * * *`), `cluster-drain` (`* * * * *`), `image-drain` (`*/5 * * * *`).
 5. Deploy the branch on Vercel; verify `/api/cron/headline` is the only Vercel cron.
@@ -131,15 +131,17 @@ The full checklist is [`migration-guide.md`](migration-guide.md); the ordered TL
 
 ## Rollback plan
 
+- **Fastest path at any step:** `vercel rollback <prior-prod-deployment-url>` for the Vercel side; per-Edge-Function `git checkout <prior-sha> -- supabase/functions/<name>/ && supabase functions deploy <name>` for the Deno side. Details in [`migration-guide.md`](migration-guide.md) §Roll-back.
 - **Through step 5:** revert the Vercel deploy, stop the new pg_cron jobs. The pgmq queues are idle when no consumer drains them.
 - **Through step 4:** also remove the pg_cron rows from `cron.job`.
-- **Through migration 026:** restore the database snapshot from step 1. Migration 026's sha256 → sha1 backfill is the only one-way change; the snapshot is the safety net.
+- **Through migration 026:** restore the database snapshot from step 1. Migration 026 hard-deletes sha256-regime rows (cascading through `cluster_articles`); the snapshot is the only way to recover them.
 
 ## Verification
 
 - `npx tsc --noEmit` — clean.
-- `npx vitest run` — 18 test files, 312 passed + 3 intentional `describe.runIf(LIVE)` skips (the live tier runs only when `SUPABASE_LOCAL_URL` is set; CI / clean dev boxes skip it).
-- Final QA Round 6 ran in two parallel Opus-pinned workflows covering security/correctness and operability/PR-readiness. Reports under `qa/round6/`. The audit surfaced 1 P0 (SSRF IPv4-mapped IPv6 bypass) and 6 P1s (DNS-rebinding TOCTOU, SECURITY DEFINER `pg_temp` shadow, two cluster-write race shapes, Edge Function `captureException` gap, `/api/metrics` missing headline-cron drift signals, `worker_checkpoint` dead schema). All P0/P1 findings are closed by the commits between `aa1fc9e` and HEAD; the corresponding regression tests are in `tests/functions/_shared/safe-fetch.test.ts` and `tests/migrations/024-028.test.ts`. Remaining audit items are P2/P3 follow-ups documented in the report files.
+- `npx vitest run` — 19 test files, 339 passed + 3 intentional `describe.runIf(LIVE)` skips (the live tier runs only when `SUPABASE_LOCAL_URL` is set; when it IS set without the `pg` driver installed, the suite hard-fails with installation instructions instead of green-skipping).
+- Final QA Round 6 ran as parallel review workflows covering security/correctness, operability/PR-readiness, docs accuracy, and test infrastructure. Reports under `qa/round6/`. The audit surfaced 1 P0 (SSRF IPv4-mapped IPv6 bypass) and 6 P1s (DNS-rebinding TOCTOU, SECURITY DEFINER `pg_temp` shadow, two cluster-write race shapes, Edge Function `captureException` gap, `/api/metrics` missing headline-cron drift signals, `worker_checkpoint` dead schema) — all closed, with regression tests in `tests/functions/_shared/safe-fetch.test.ts` and `tests/migrations/024-028.test.ts`.
+- The Round-6 P2/P3 backlog is also closed in the follow-up commit set: poison messages archive instead of delete, budget-aware queue reads, unified poison contract, conditional `image_url` writes, ingest row-error accounting and a reserved write window, JSON drain/error logs with queue depth, per-queue health thresholds, malformed `worker_metrics` rows failing the probe, unified case-insensitive bearer auth via `src/lib/api/bearer.ts`, denominator-bearing metrics ratios, trigger-level WHEN clauses with pinned function ownership, a lowercase-hex `content_hash` CHECK, `cluster_link_atomic` stamping `updated_at = now()` for honest liveness, Sentry wrapper unit tests, and a pgmq-exposure grant tripwire. The only audit items deliberately not applied are the commit-history squash recommendations — see the note below.
 
 ## Commit history note
 
