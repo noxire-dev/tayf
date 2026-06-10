@@ -43,7 +43,7 @@ Confirm you have:
 - The current main branch is healthy: `npm run build` passes, `npm test` passes.
 - A maintenance window. Article ingestion stops for the few minutes between turning off the legacy worker and the new cron schedule firing. Cluster + image-backfill have visibility-timeout-driven re-delivery so partial-state hand-off is safe, but the gap is real.
 
-Take a database snapshot before starting (Supabase Dashboard → Database → Backups → Create snapshot). The migrations are additive but migration 026 rewrites `content_hash` for rows already under the sha256 regime — irreversible without a restore.
+Take a database snapshot before starting (Supabase Dashboard → Database → Backups → Create snapshot). The migrations are additive but migration 026 hard-deletes rows still under the sha256 regime (silent duplicates of their sha1 twins; the delete cascades through `cluster_articles`) — irreversible without a restore.
 
 If `supabase link` has not been run on this machine yet, link now so subsequent commands resolve the project without the `--project-ref` flag:
 
@@ -504,7 +504,7 @@ for that line to confirm which deployment is the broken one.
 
 The first invocation after a long idle (Supabase scales these to zero after ~15 minutes) adds 200–500 ms latency. The `* * * * *` schedule on cluster-drain keeps the function warm; if you raise the schedule interval, expect more cold starts.
 
-### Migration 026 failed mid-rehash
+### Migration 026 failed mid-run
 
 The migration uses a single transaction and is idempotent (per its header comment). Re-run it. If a row's `content_hash` somehow drifted to an unexpected length, the CHECK constraint at the bottom of the migration will fail; in that case, manually inspect and patch the offending rows before re-running.
 
@@ -545,6 +545,8 @@ npm test
 
 ## Roll-back
 
+Fastest path first: if the breakage is in the Vercel deploy, `vercel rollback <prior-prod-deployment-url>` (or Dashboard → Deployments → ⋯ → Promote to Production) restores the previous production deployment instantly, no rebuild. The git-revert path below is the durable fix once the fire is out.
+
 If the new system misbehaves and you need to revert to the legacy per-worker scripts:
 
 1. Pause the pg_cron jobs (don't delete them — pausing is reversible):
@@ -573,6 +575,8 @@ If the new system misbehaves and you need to revert to the legacy per-worker scr
 3. The legacy per-worker scripts (`scripts/rss-worker.mjs` etc.) are **deleted** from this branch (commit 7d84ece). If you need them back, revert the refactor commit set in git before redeploying Vercel — there is no way to restart them from the post-refactor working tree alone.
 
 4. Migration 026's CHECK constraint stays in place (it's forward-compatible — the legacy worker also writes 40-char sha1 hashes). Migrations 024, 025, 027, and 028 also stay; the new triggers and the `cluster_link_atomic` RPC do no harm with the queues paused and no Edge Function dialling the RPC.
+
+5. Steps 1a and 4 need no reversal. `pgmq` can stay in PostgREST's Exposed schemas — the REST surface is bearer-gated (service-role only, per migration 024's grants) and a later roll-forward needs the schema exposed again anyway. `CRON_SECRET` can likewise stay set on Vercel: rolling back the Edge Functions (step 2 above) does not restore the legacy `/api/cron/*` routes, so the variable sits unused by anything except `/api/cron/headline`.
 
 A *destructive* rollback (drop the queues + remove the triggers + drop `cluster_link_atomic`) is intentionally not pre-prepared because the user's instruction was *forward-only*: every recovery from a bad worker-stream deployment should resolve forward, not backward. If a destructive rollback is genuinely required, hand-write a migration that drops `cluster_link_atomic`, the two `enqueue_*` trigger functions and their triggers, the `worker_metrics` view, and the pgmq queues (`select pgmq.drop_queue('cluster_work'); select pgmq.drop_queue('image_backfill');`).
 
