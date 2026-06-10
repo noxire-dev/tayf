@@ -162,25 +162,54 @@ function extractImage(item: RawFeedItem): string | null {
 // Text helpers
 // ---------------------------------------------------------------------------
 
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+};
+
+// Single-pass entity decode. Every entity is consumed exactly once by one
+// regex, so no replacement's output can be re-interpreted as another entity
+// ("&amp;lt;" decodes to the literal "&lt;", never to "<"). Matches the named
+// entities, decimal (&#N;) and hex (&#xN;) numeric references the legacy
+// modules handled.
 function decodeEntities(text: string): string {
-  return text
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#39;/g, "'")
-    .replace(/&#34;/g, '"')
-    .replace(/&nbsp;/g, " ")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) =>
-      String.fromCodePoint(parseInt(n, 16)),
-    );
+  return text.replace(
+    /&(amp|lt|gt|quot|apos|nbsp|#\d+|#x[0-9a-fA-F]+);/g,
+    (match, entity: string) => {
+      if (entity[0] === "#") {
+        const codePoint =
+          entity[1] === "x" || entity[1] === "X"
+            ? parseInt(entity.slice(2), 16)
+            : Number(entity.slice(1));
+        return Number.isNaN(codePoint) ? match : String.fromCodePoint(codePoint);
+      }
+      return NAMED_ENTITIES[entity] ?? match;
+    },
+  );
+}
+
+// Strip HTML tags repeatedly until the string stops changing. A single
+// `/<[^>]*>/` pass can leave a tag behind for crafted input like
+// "<<script>script>", so loop to a fixpoint.
+function stripTags(text: string): string {
+  let prev: string;
+  let out = text;
+  do {
+    prev = out;
+    out = out.replace(/<[^>]*>/g, "");
+  } while (out !== prev);
+  return out;
 }
 
 function cleanDescription(raw?: string | null): string | null {
   if (!raw) return null;
-  const text = decodeEntities(raw.replace(/<[^>]*>/g, "")).trim();
+  // Decode FIRST so entity-encoded markup becomes real angle brackets, then
+  // strip tags to a fixpoint so reintroduced or nested markup can't survive.
+  const text = stripTags(decodeEntities(raw)).trim();
   if (!text) return null;
   return text.length > 500 ? text.slice(0, 497) + "..." : text;
 }
@@ -288,7 +317,10 @@ export function normalizeItem(
   const rawLink = item.link?.trim() ?? "";
   if (!rawTitle || !rawLink) return null;
 
-  const title = decodeEntities(rawTitle).trim();
+  // Titles are short plain text; decode entities then strip any (possibly
+  // reintroduced or nested) markup to a fixpoint, same discipline as
+  // `cleanDescription`.
+  const title = stripTags(decodeEntities(rawTitle)).trim();
   const absoluteUrl = absolutiseUrl(rawLink, source);
   const canonicalUrl = canonicalizeUrl(absoluteUrl, source.slug);
 

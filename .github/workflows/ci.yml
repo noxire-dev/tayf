@@ -6,6 +6,12 @@ on:
   push:
     branches: [main]
 
+# The job only checks out, installs, lints, type-checks, and tests — none of
+# which write back to the repo or its security surfaces. Pin GITHUB_TOKEN to
+# least privilege so a compromised dependency can't escalate.
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
