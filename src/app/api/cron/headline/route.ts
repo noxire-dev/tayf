@@ -1,13 +1,7 @@
-import { Buffer } from "node:buffer";
-import { timingSafeEqual } from "node:crypto";
 import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import {
-  apiError,
-  apiServerError,
-  apiUnauthorized,
-  withApiErrors,
-} from "@/lib/api/errors";
+import { requireCronBearer } from "@/lib/api/bearer";
+import { apiError, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
 // Boot-time guard. The route is FAIL-CLOSED on a missing `CRON_SECRET` (503
@@ -39,12 +33,11 @@ if (process.env.NODE_ENV === "production" && !process.env.CRON_SECRET) {
  *
  * AUTH
  * ----
- * Bearer token comparison uses `crypto.timingSafeEqual` to avoid leaking the
- * secret through string-compare timing. The route is FAIL-CLOSED: if
- * `CRON_SECRET` is unset (or empty) in the runtime environment, we return
- * 503 rather than allowing unauthenticated invocations. Vercel cron pings
- * this endpoint with `Authorization: Bearer <CRON_SECRET>` automatically;
- * any external caller must supply the same header.
+ * Gated by `requireCronBearer` (`src/lib/api/bearer.ts`): constant-time
+ * token comparison, case-insensitive scheme, FAIL-CLOSED 503 when
+ * `CRON_SECRET` is unset (or empty) in the runtime environment. Vercel cron
+ * pings this endpoint with `Authorization: Bearer <CRON_SECRET>`
+ * automatically; any external caller must supply the same header.
  */
 
 // Vercel Pro Hobby/Pro tier ceiling for cron routes. Per-cycle work is
@@ -81,28 +74,6 @@ const LLM_API_URL =
   process.env.LLM_API_URL ?? "https://api.anthropic.com/v1/messages";
 const LLM_MODEL =
   process.env.LLM_MODEL ?? "claude-haiku-4-5-20251001";
-
-/**
- * Constant-time bearer-token check.
- *
- * Returns true iff `header` is exactly `Bearer ${secret}` and the suffix
- * matches `secret` byte-for-byte. `timingSafeEqual` requires equal-length
- * buffers, so we short-circuit on length mismatch BEFORE the call to avoid
- * the throw — but only on length, never on content, so an attacker cannot
- * distinguish "wrong length" from "wrong bytes" via response time within
- * the same length class.
- */
-function isAuthorized(header: string | null, secret: string): boolean {
-  if (!header) return false;
-  const prefix = "Bearer ";
-  if (!header.startsWith(prefix)) return false;
-  const provided = header.slice(prefix.length);
-
-  const providedBuf = Buffer.from(provided, "utf8");
-  const expectedBuf = Buffer.from(secret, "utf8");
-  if (providedBuf.length !== expectedBuf.length) return false;
-  return timingSafeEqual(providedBuf, expectedBuf);
-}
 
 interface ClusterCandidate {
   id: string;
@@ -191,18 +162,13 @@ export const GET = withApiErrors(async (request: Request) => {
   // See https://nextjs.org/docs/messages/next-prerender-sync-request.
   await connection();
 
-  // FAIL-CLOSED: if no CRON_SECRET is configured we refuse the request
-  // outright rather than the legacy `if (process.env.CRON_SECRET && ...)`
+  // FAIL-CLOSED bearer gate (shared helper): 503 when CRON_SECRET is
+  // unset/empty rather than the legacy `if (process.env.CRON_SECRET && ...)`
   // pattern that silently waved everything through in dev / mis-deployed
-  // environments. Audit T3 P0-9.
-  const secret = process.env.CRON_SECRET;
-  if (!secret || secret.length === 0) {
-    return apiError(503, "CRON_SECRET is not configured");
-  }
-
-  const authHeader = request.headers.get("authorization");
-  if (!isAuthorized(authHeader, secret)) {
-    return apiUnauthorized();
+  // environments; 401 on a missing or mismatched token. Audit T3 P0-9.
+  const auth = requireCronBearer(request);
+  if (!auth.ok) {
+    return auth.response;
   }
 
   const rl = headlineLimit(clientKey(request));

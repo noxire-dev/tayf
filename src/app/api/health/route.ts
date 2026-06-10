@@ -1,7 +1,6 @@
-import { Buffer } from "node:buffer";
-import { timingSafeEqual } from "node:crypto";
 import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
+import { requireCronBearer } from "@/lib/api/bearer";
 import { withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
@@ -22,9 +21,11 @@ import { clientKey, createRateLimiter } from "@/lib/rate-limit";
  *     expose internal probe data to the open internet because that data
  *     (queue depths, article-age, missing env-var names) is operational
  *     reconnaissance an attacker can use to time pressure on the pipeline.
- *   - Callers authenticated via `Authorization: Bearer ${CRON_SECRET}`
- *     receive the full per-check breakdown. The bearer check re-uses the
- *     same constant-time helper as `/api/cron/headline`.
+ *   - Callers presenting an Authorization header are asking for the full
+ *     per-check breakdown and go through the shared `requireCronBearer`
+ *     gate (`src/lib/api/bearer.ts`): FAIL-CLOSED 503 when `CRON_SECRET`
+ *     is unset/empty, 401 on a mismatched token — the same posture as
+ *     `/api/cron/headline`.
  *
  * Constraints:
  *   - Must never block the caller for more than ~2s per check. Each
@@ -80,61 +81,42 @@ const STALE_INGESTION_THRESHOLD_SEC = 600; // 10 minutes — see AGENTS.md
 // traffic many minutes can pass with no NEW clusters formed even while
 // the consumer is happily ack-ing messages.
 const STALE_CLUSTERING_THRESHOLD_SEC = 15 * 60;
-// B8: queue-depth alarm. The cluster_work consumer batches 50 messages per
-// invocation and runs every minute; the image_backfill consumer batches 20
-// every 5 minutes. We consider 500 messages in-flight a sign of a stuck
-// consumer rather than a normal backlog. Oldest-message-age over 30 min is
-// a stronger signal — a single message that's been visible for 30+ min
-// almost certainly means the consumer is failing to archive it.
-const QUEUE_DEPTH_THRESHOLD = 500;
+// B8: queue-depth alarms, sized per queue because consumer throughputs
+// differ by an order of magnitude. The cluster_work consumer batches 50
+// messages per invocation and runs every minute, so 500 in-flight is ~10
+// minutes of throughput — a stuck consumer rather than a normal backlog.
+// The image_backfill consumer batches only 20 every 5 minutes (~4 msgs/min);
+// the same 500 would take two hours to drain, so 100 (~25 minutes of
+// throughput) is the equivalent stuck-consumer signal for that queue.
+// Oldest-message-age over 30 min is a stronger signal — a single message
+// that's been visible for 30+ min almost certainly means the consumer is
+// failing to archive it.
+const QUEUE_DEPTH_THRESHOLDS: Record<string, { depth: number }> = {
+  cluster_work: { depth: 500 },
+  image_backfill: { depth: 100 },
+};
+// A queue added by a future migration but not yet tuned above alarms on the
+// strictest configured bound rather than growing unwatched.
+const FALLBACK_QUEUE_DEPTH_THRESHOLD = 100;
 const QUEUE_OLDEST_AGE_THRESHOLD_SEC = 30 * 60;
 
-// Anonymous callers are rate-limited so the public `{status}` envelope path
-// can't be turned into a cheap DoS amplifier against Supabase. The bearer
-// path (authenticated via CRON_SECRET) bypasses this limiter — the
-// monitoring / cron system has a legitimate need to probe at high cadence,
-// and the bearer check is already constant-time-safe + secret-gated.
+// Anonymous callers are rate-limited per client key so the public `{status}`
+// envelope path can't be used to hammer Supabase for free. The limiter is
+// process-local (`src/lib/rate-limit.ts`): on a multi-instance deploy each
+// instance keeps its own buckets, so this bounds probe cost PER INSTANCE —
+// it is not a global flood defense. Capacity stays small so N instances ×
+// capacity remains cheap against Supabase. The bearer path (authenticated
+// via CRON_SECRET) bypasses this limiter — the monitoring / cron system has
+// a legitimate need to probe at high cadence, and the bearer check is
+// already constant-time-safe + secret-gated.
 //
-// Token-bucket sizing: capacity 30 / refill 1 token per second lets a
-// single client burst up to 30 probes instantly (e.g. a status-page
-// dashboard fanning out on first paint) then settles to a steady 1/sec.
+// Token-bucket sizing: capacity 5 / refill 1 token per second absorbs a
+// small first-paint burst (e.g. a status-page dashboard fanning out) then
+// settles to a steady 1/sec per client per instance.
 const anonHealthLimit = createRateLimiter("health-anon", {
-  capacity: 30,
+  capacity: 5,
   refillPerSecond: 1,
 });
-
-/**
- * Constant-time bearer-token check. Mirrors the helper in
- * `/api/cron/headline`. Returns true iff `header` is exactly
- * `Bearer ${secret}`. Length is compared first so `timingSafeEqual`'s
- * equal-length precondition is satisfied without throwing; length leakage
- * is unavoidable and not a real attack surface here.
- */
-function isAuthorized(header: string | null, secret: string): boolean {
-  if (!header) return false;
-  const prefix = "Bearer ";
-  if (!header.startsWith(prefix)) return false;
-  const provided = header.slice(prefix.length);
-
-  const providedBuf = Buffer.from(provided, "utf8");
-  const expectedBuf = Buffer.from(secret, "utf8");
-  if (providedBuf.length !== expectedBuf.length) return false;
-  return timingSafeEqual(providedBuf, expectedBuf);
-}
-
-/**
- * Returns true iff the caller presented a valid `Authorization: Bearer
- * ${CRON_SECRET}` header. Centralised here so the rate-limit gate at the
- * top of GET and the response-shape switch in `respond` agree on the
- * answer. A missing or empty `CRON_SECRET` env var means there is no way
- * to authenticate, so every caller is treated as anonymous.
- */
-function isAuthenticated(request: Request | undefined): boolean {
-  if (request === undefined) return false;
-  const secret = process.env.CRON_SECRET;
-  if (typeof secret !== "string" || secret.length === 0) return false;
-  return isAuthorized(request.headers.get("authorization"), secret);
-}
 
 /**
  * Race a promise against a timer so a single hung subsystem can't blow our
@@ -193,10 +175,25 @@ export const GET = withApiErrors(async (request?: Request) => {
   // request, so the handler stays fully dynamic.
   await connection();
 
-  // Determine authentication early so we can decide whether to apply the
-  // anonymous rate-limit gate BEFORE running any probes. An over-limit
-  // anonymous caller short-circuits with 429 and never touches Supabase.
-  const authed = isAuthenticated(request);
+  // Two-tier auth, decided once up front. A request WITHOUT an
+  // Authorization header takes the anonymous path: rate-limited, summary
+  // `{ status, timestamp }` envelope, CRON_SECRET never read. A request
+  // that presents an Authorization header is asking for the detailed
+  // envelope and goes through the shared FAIL-CLOSED bearer gate (503 when
+  // CRON_SECRET is unset/empty, 401 on a mismatched token), which reads
+  // CRON_SECRET exactly once. `respond` receives the verdict instead of
+  // re-deriving it, so no second env read happens per request.
+  let authed = false;
+  if (request !== undefined && request.headers.get("authorization") !== null) {
+    const auth = requireCronBearer(request);
+    if (!auth.ok) {
+      return auth.response;
+    }
+    authed = true;
+  }
+
+  // Anonymous callers hit the rate-limit gate BEFORE any probes run. An
+  // over-limit caller short-circuits with 429 and never touches Supabase.
   if (!authed && request !== undefined) {
     const rl = anonHealthLimit(clientKey(request));
     if (!rl.allowed) {
@@ -231,7 +228,7 @@ export const GET = withApiErrors(async (request?: Request) => {
   // client will throw on construction. Short-circuit to a 503 with a useful
   // payload so on-call sees exactly what's missing.
   if (!checks.env.ok) {
-    return respond("unhealthy", checks, 503, request);
+    return respond("unhealthy", checks, 503, authed);
   }
 
   // 2. DB check — `select 1`-equivalent against a tiny, always-present table.
@@ -331,7 +328,11 @@ export const GET = withApiErrors(async (request?: Request) => {
   //    `oldest_msg_age_sec` is coerced through `Number()` and gated by
   //    `Number.isFinite` so a string / NaN coming back from the view
   //    (driver quirks, BIGINT serialisation, etc.) can't accidentally
-  //    pass a numeric comparison against the threshold.
+  //    pass a numeric comparison against the threshold. A null age is a
+  //    legitimate state (empty queue), so non-finite ages coerce to null.
+  //    `queue_length` is held to a harder line: an empty queue reports 0,
+  //    so a NULL / non-numeric length has no legitimate meaning and fails
+  //    the probe outright instead of masquerading as a healthy zero.
   const queuesResult = await safeProbe(async () => {
     const supabase = createServerClient();
     const { data, error } = await supabase
@@ -348,36 +349,52 @@ export const GET = withApiErrors(async (request?: Request) => {
     }
     type Row = {
       queue_name: string;
-      queue_length: number | null;
+      queue_length: number | string | null;
       oldest_msg_age_sec: number | string | null;
     };
     const rows = data as Row[];
-    const metrics: QueueMetric[] = rows.map((r) => {
+    const metrics: QueueMetric[] = [];
+    for (const r of rows) {
+      // `Number(null)` is 0, so route null/undefined through NaN to keep
+      // them on the failure path with every other non-finite value.
+      const lengthNum = Number(r.queue_length ?? NaN);
+      if (!Number.isFinite(lengthNum)) {
+        return {
+          ok: false as const,
+          error: `malformed worker_metrics row: queue ${r.queue_name} queue_length is not a finite number`,
+        };
+      }
       const ageRaw = r.oldest_msg_age_sec;
       const ageNum = ageRaw === null ? null : Number(ageRaw);
       const oldestMsgAgeSec =
         ageNum !== null && Number.isFinite(ageNum) ? ageNum : null;
-      return {
+      metrics.push({
         queue: r.queue_name,
-        queueLength: r.queue_length ?? 0,
+        queueLength: lengthNum,
         oldestMsgAgeSec,
-      };
-    });
-    const overDepth = metrics.find(
-      (m) => m.queueLength > QUEUE_DEPTH_THRESHOLD
-    );
+      });
+    }
+    // Depth bounds are per-queue (consumer throughputs differ by an order
+    // of magnitude); the error names the tripping queue, dimension, and
+    // the bound that applied so on-call doesn't have to guess which limit
+    // fired.
+    for (const m of metrics) {
+      const depthLimit =
+        QUEUE_DEPTH_THRESHOLDS[m.queue]?.depth ??
+        FALLBACK_QUEUE_DEPTH_THRESHOLD;
+      if (m.queueLength > depthLimit) {
+        return {
+          ok: false as const,
+          metrics,
+          error: `queue ${m.queue} depth ${m.queueLength} exceeds ${depthLimit}`,
+        };
+      }
+    }
     const overAge = metrics.find(
       (m) =>
         m.oldestMsgAgeSec !== null &&
         m.oldestMsgAgeSec > QUEUE_OLDEST_AGE_THRESHOLD_SEC
     );
-    if (overDepth) {
-      return {
-        ok: false as const,
-        metrics,
-        error: `queue ${overDepth.queue} depth ${overDepth.queueLength} exceeds ${QUEUE_DEPTH_THRESHOLD}`,
-      };
-    }
     if (overAge) {
       return {
         ok: false as const,
@@ -415,24 +432,25 @@ export const GET = withApiErrors(async (request?: Request) => {
       ? "unhealthy"
       : "degraded";
 
-  return respond(verdict, checks, anyCritical ? 503 : 200, request);
+  return respond(verdict, checks, anyCritical ? 503 : 200, authed);
 });
 
 /**
  * Build the JSON response. Authenticated callers (CRON_SECRET bearer) get
  * the full probe breakdown; anonymous callers get only the rollup verdict
- * + timestamp. Cache-Control is `no-store` so neither the CDN nor the
- * browser can serve a stale "healthy" snapshot while the pipeline is
+ * + timestamp. The `authed` flag is the bearer-gate verdict computed once
+ * at the top of GET — re-checking here would mean a second CRON_SECRET
+ * read per request. Cache-Control is `no-store` so neither the CDN nor
+ * the browser can serve a stale "healthy" snapshot while the pipeline is
  * actually on fire.
  */
 function respond(
   verdict: HealthVerdict,
   checks: HealthChecks,
   status: number,
-  request?: Request
+  authed: boolean
 ): Response {
   const timestamp = new Date().toISOString();
-  const authed = isAuthenticated(request);
 
   const headers = { "Cache-Control": "no-store" };
 

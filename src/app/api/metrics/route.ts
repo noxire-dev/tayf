@@ -1,12 +1,7 @@
-import { Buffer } from "node:buffer";
-import { timingSafeEqual } from "node:crypto";
 import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import {
-  apiError,
-  apiUnauthorized,
-  withApiErrors,
-} from "@/lib/api/errors";
+import { requireCronBearer } from "@/lib/api/bearer";
+import { apiError, withApiErrors } from "@/lib/api/errors";
 
 /**
  * Operational metrics endpoint.
@@ -23,8 +18,8 @@ import {
  * (queue depths, article-age, blindspot counts) is operational
  * reconnaissance — useful to anyone running the dashboards, dangerous in
  * an attacker's hands when timing pressure on the pipeline. The bearer
- * check mirrors `/api/cron/headline` byte-for-byte (constant-time
- * compare, FAIL-CLOSED when `CRON_SECRET` is unset).
+ * gate is the shared `requireCronBearer` helper (`src/lib/api/bearer.ts`):
+ * constant-time compare, FAIL-CLOSED 503 when `CRON_SECRET` is unset.
  *
  * Wrapped in `withApiErrors` so an unexpected throw (Supabase RPC quirk,
  * row-count overflow, etc.) returns the canonical JSON-500 envelope and
@@ -38,13 +33,38 @@ interface Metrics {
     last24h: number;
     lastHour: number;
     politicsNullImage: number;
+    /**
+     * All politics-tier articles (politika / son_dakika) — the denominator
+     * for `politicsImageMissingRatio` below.
+     */
+    politicsTotal: number;
     withImage: number;
+    /**
+     * politicsNullImage / politicsTotal, rounded to two decimals; 0 when
+     * no politics-tier articles exist yet. The raw politicsNullImage count
+     * is meaningless without this denominator — 15 missing images is noise
+     * across 10k politics articles and a crisis across 30.
+     */
+    politicsImageMissingRatio: number;
   };
   clusters: {
     total: number;
     multiArticle: number;
     blindspots: number;
+    /**
+     * Mean article count across ALL clusters (singletons included).
+     * Singleton clusters drag this toward 1 as the corpus ages, so read it
+     * as a corpus-shape signal, not a clustering-quality one. Kept stable —
+     * dashboards already chart it.
+     */
     avgArticlesPerCluster: number;
+    /**
+     * Mean article count across multi-article clusters only. Every
+     * singleton holds exactly one article, so the multi-cluster article
+     * mass is `total articles - (total clusters - multiArticle)`. Rounded
+     * to two decimals; 0 when no multi-article clusters exist yet.
+     */
+    avgArticlesPerMultiCluster: number;
     /**
      * Multi-article clusters eligible for the neutral-headline rewrite
      * (article_count >= 3 per the /api/cron/headline batch query). On-call
@@ -76,40 +96,18 @@ interface Metrics {
   };
 }
 
-/**
- * Constant-time bearer-token check. Mirrors `/api/cron/headline`. Length
- * is compared first so `timingSafeEqual`'s equal-length precondition is
- * satisfied without throwing; length leakage is not a real attack surface
- * here.
- */
-function isAuthorized(header: string | null, secret: string): boolean {
-  if (!header) return false;
-  const prefix = "Bearer ";
-  if (!header.startsWith(prefix)) return false;
-  const provided = header.slice(prefix.length);
-
-  const providedBuf = Buffer.from(provided, "utf8");
-  const expectedBuf = Buffer.from(secret, "utf8");
-  if (providedBuf.length !== expectedBuf.length) return false;
-  return timingSafeEqual(providedBuf, expectedBuf);
-}
-
 export const GET = withApiErrors(async (request: Request) => {
   // Stay dynamic — `cacheComponents` would otherwise prerender this and
   // pin a "100 articles, 0 clusters" snapshot into the CDN forever.
   await connection();
 
-  // FAIL-CLOSED: a missing or empty CRON_SECRET means we cannot enforce
-  // bearer auth, so we refuse the request outright rather than serving
-  // operational data anonymously. Same pattern as `/api/cron/headline`.
-  const secret = process.env.CRON_SECRET;
-  if (!secret || secret.length === 0) {
-    return apiError(503, "CRON_SECRET is not configured");
-  }
-
-  const authHeader = request.headers.get("authorization");
-  if (!isAuthorized(authHeader, secret)) {
-    return apiUnauthorized();
+  // FAIL-CLOSED bearer gate (shared helper): a missing or empty CRON_SECRET
+  // means we cannot enforce bearer auth, so we refuse the request with 503
+  // rather than serving operational data anonymously; 401 on a missing or
+  // mismatched token. Same gate as `/api/cron/headline`.
+  const auth = requireCronBearer(request);
+  if (!auth.ok) {
+    return auth.response;
   }
 
   const supabase = createServerClient();
@@ -134,6 +132,7 @@ export const GET = withApiErrors(async (request: Request) => {
     { name: "articlesLast24h", q: supabase.from("articles").select("*", { count: "exact", head: true }).gte("created_at", new Date(Date.now() - 24 * 3600_000).toISOString()) },
     { name: "articlesLastHour", q: supabase.from("articles").select("*", { count: "exact", head: true }).gte("created_at", new Date(Date.now() - 3600_000).toISOString()) },
     { name: "politicsNullImage", q: supabase.from("articles").select("*", { count: "exact", head: true }).is("image_url", null).in("category", ["politika", "son_dakika"]) },
+    { name: "politicsTotal", q: supabase.from("articles").select("*", { count: "exact", head: true }).in("category", ["politika", "son_dakika"]) },
     { name: "articlesWithImage", q: supabase.from("articles").select("*", { count: "exact", head: true }).not("image_url", "is", null) },
     { name: "clustersTotal", q: supabase.from("clusters").select("*", { count: "exact", head: true }) },
     { name: "clustersMulti", q: supabase.from("clusters").select("*", { count: "exact", head: true }).gte("article_count", 2) },
@@ -165,7 +164,7 @@ export const GET = withApiErrors(async (request: Request) => {
   }
 
   // results[i] is guaranteed defined: the `queries` array is a literal of
-  // exactly 12 entries, so Promise.all returns exactly 12 results. The non-
+  // exactly 13 entries, so Promise.all returns exactly 13 results. The non-
   // null assertions below mirror that invariant for the strict tsconfig
   // (noUncheckedIndexedAccess); the alternative is a tuple type, which is
   // noisier for the same guarantee.
@@ -173,14 +172,15 @@ export const GET = withApiErrors(async (request: Request) => {
   const articlesLast24h = results[1]!;
   const articlesLastHour = results[2]!;
   const politicsNullImage = results[3]!;
-  const articlesWithImage = results[4]!;
-  const clustersTotal = results[5]!;
-  const clustersMulti = results[6]!;
-  const clustersBlindspots = results[7]!;
-  const clustersNeutralizedEligible = results[8]!;
-  const clustersNeutralized = results[9]!;
-  const sourcesTotal = results[10]!;
-  const sourcesActive = results[11]!;
+  const politicsTotal = results[4]!;
+  const articlesWithImage = results[5]!;
+  const clustersTotal = results[6]!;
+  const clustersMulti = results[7]!;
+  const clustersBlindspots = results[8]!;
+  const clustersNeutralizedEligible = results[9]!;
+  const clustersNeutralized = results[10]!;
+  const sourcesTotal = results[11]!;
+  const sourcesActive = results[12]!;
 
   if (oldestPendingNeutralRes.error) {
     console.error(
@@ -194,7 +194,10 @@ export const GET = withApiErrors(async (request: Request) => {
   }
 
   const clustersCount = clustersTotal.count ?? 0;
+  const multiClusterCount = clustersMulti.count ?? 0;
   const totalArticles = articlesTotal.count ?? 0;
+  const politicsNullImageCount = politicsNullImage.count ?? 0;
+  const politicsTotalCount = politicsTotal.count ?? 0;
   const eligibleCount = clustersNeutralizedEligible.count ?? 0;
   const neutralizedCount = clustersNeutralized.count ?? 0;
   const oldestPendingFirstPublished =
@@ -213,14 +216,21 @@ export const GET = withApiErrors(async (request: Request) => {
       total: totalArticles,
       last24h: articlesLast24h.count ?? 0,
       lastHour: articlesLastHour.count ?? 0,
-      politicsNullImage: politicsNullImage.count ?? 0,
+      politicsNullImage: politicsNullImageCount,
+      politicsTotal: politicsTotalCount,
       withImage: articlesWithImage.count ?? 0,
+      politicsImageMissingRatio: politicsTotalCount > 0
+        ? Math.round((politicsNullImageCount / politicsTotalCount) * 100) / 100
+        : 0,
     },
     clusters: {
       total: clustersCount,
-      multiArticle: clustersMulti.count ?? 0,
+      multiArticle: multiClusterCount,
       blindspots: clustersBlindspots.count ?? 0,
       avgArticlesPerCluster: clustersCount > 0 ? Math.round((totalArticles / clustersCount) * 100) / 100 : 0,
+      avgArticlesPerMultiCluster: multiClusterCount > 0
+        ? Math.round(((totalArticles - (clustersCount - multiClusterCount)) / multiClusterCount) * 100) / 100
+        : 0,
       neutralizedEligible: eligibleCount,
       neutralized: neutralizedCount,
       neutralizedRatio: eligibleCount > 0

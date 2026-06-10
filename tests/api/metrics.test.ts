@@ -23,7 +23,7 @@ vi.mock("next/server", async (importOriginal) => {
 // ---------------------------------------------------------------------------
 // Supabase mock plumbing for /api/metrics.
 //
-// The route issues Promise.all over ten count queries. Each one starts with
+// The route issues Promise.all over thirteen count queries. Each one starts with
 // `supabase.from("<table>").select("*", { count: "exact", head: true })` and
 // then chains zero or more filter predicates (.gte / .is / .in / .not / .eq).
 // Every chain is thenable (the route `await`s on them directly via Promise.all)
@@ -51,15 +51,19 @@ const DEFAULT_COUNTS: CountResponse[] = [
   { count: 20, error: null }, // 1  articlesLast24h
   { count: 5, error: null }, // 2  articlesLastHour
   { count: 3, error: null }, // 3  politicsNullImage
-  { count: 77, error: null }, // 4  articlesWithImage
-  { count: 40, error: null }, // 5  clustersTotal
-  { count: 12, error: null }, // 6  clustersMulti
-  { count: 2, error: null }, // 7  clustersBlindspots
-  { count: 10, error: null }, // 8  clustersNeutralizedEligible
-  { count: 7, error: null }, // 9  clustersNeutralized
-  { count: 8, error: null }, // 10 sourcesTotal
-  { count: 7, error: null }, // 11 sourcesActive
-  // 12 oldestPendingNeutral — null data means "no pending row"; the
+  // politicsTotal is deliberately distinct from every other default so a
+  // query-order swap (e.g. with politicsNullImage above) skews the ratio
+  // and fails the shape assertion loudly instead of passing by luck.
+  { count: 16, error: null }, // 4  politicsTotal
+  { count: 77, error: null }, // 5  articlesWithImage
+  { count: 40, error: null }, // 6  clustersTotal
+  { count: 12, error: null }, // 7  clustersMulti
+  { count: 2, error: null }, // 8  clustersBlindspots
+  { count: 10, error: null }, // 9  clustersNeutralizedEligible
+  { count: 7, error: null }, // 10 clustersNeutralized
+  { count: 8, error: null }, // 11 sourcesTotal
+  { count: 7, error: null }, // 12 sourcesActive
+  // 13 oldestPendingNeutral — null data means "no pending row"; the
   // route renders this as `oldestPendingNeutralAgeSec: null`.
   { count: null, data: null, error: null },
 ];
@@ -172,7 +176,10 @@ describe("GET /api/metrics", () => {
       last24h: 20,
       lastHour: 5,
       politicsNullImage: 3,
+      politicsTotal: 16,
       withImage: 77,
+      // 3 / 16 = 0.1875 → 0.19 (rounded to 2 decimal places)
+      politicsImageMissingRatio: 0.19,
     });
 
     expect(body.clusters).toEqual({
@@ -181,6 +188,10 @@ describe("GET /api/metrics", () => {
       blindspots: 2,
       // 100 / 40 = 2.5 (rounded to 2 decimal places)
       avgArticlesPerCluster: 2.5,
+      // (100 - (40 - 12)) / 12 = 72 / 12 = 6 — singleton clusters hold
+      // exactly one article each, so 72 articles live in the 12
+      // multi-article clusters.
+      avgArticlesPerMultiCluster: 6,
       neutralizedEligible: 10,
       neutralized: 7,
       // 7 / 10 = 0.70 — well below the 0.9 page threshold the docs
@@ -213,9 +224,12 @@ describe("GET /api/metrics", () => {
     expect(body.articles.last24h).toBe(0);
     expect(body.articles.lastHour).toBe(0);
     expect(body.articles.politicsNullImage).toBe(0);
+    expect(body.articles.politicsTotal).toBe(0);
+    expect(body.articles.politicsImageMissingRatio).toBe(0);
     expect(body.articles.withImage).toBe(0);
     expect(body.clusters.total).toBe(0);
     expect(body.clusters.multiArticle).toBe(0);
+    expect(body.clusters.avgArticlesPerMultiCluster).toBe(0);
     expect(body.clusters.blindspots).toBe(0);
     expect(body.sources.total).toBe(0);
     expect(body.sources.active).toBe(0);
@@ -223,8 +237,8 @@ describe("GET /api/metrics", () => {
 
   it("sets avgArticlesPerCluster to 0 when there are no clusters (avoids div-by-zero)", async () => {
     currentCounts = [...DEFAULT_COUNTS];
-    // clustersTotal is index 5
-    currentCounts[5] = { count: 0, error: null };
+    // clustersTotal is index 6
+    currentCounts[6] = { count: 0, error: null };
     const { status, body } = await callGet();
     expect(status).toBe(200);
     expect(body.clusters.total).toBe(0);
@@ -235,8 +249,38 @@ describe("GET /api/metrics", () => {
     currentCounts = [...DEFAULT_COUNTS];
     // 7 articles / 3 clusters = 2.3333... → rounds to 2.33
     currentCounts[0] = { count: 7, error: null }; // articlesTotal
-    currentCounts[5] = { count: 3, error: null }; // clustersTotal
+    currentCounts[6] = { count: 3, error: null }; // clustersTotal
     const { body } = await callGet();
     expect(body.clusters.avgArticlesPerCluster).toBe(2.33);
+  });
+
+  it("sets politicsImageMissingRatio to 0 when there are no politics articles", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    currentCounts[4] = { count: 0, error: null }; // politicsTotal
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.articles.politicsTotal).toBe(0);
+    expect(body.articles.politicsImageMissingRatio).toBe(0);
+  });
+
+  it("computes avgArticlesPerMultiCluster over multi-article clusters only", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    // 50 articles, 20 clusters, 7 of them multi-article:
+    // (50 - (20 - 7)) / 7 = 37 / 7 = 5.2857... → rounds to 5.29
+    currentCounts[0] = { count: 50, error: null }; // articlesTotal
+    currentCounts[6] = { count: 20, error: null }; // clustersTotal
+    currentCounts[7] = { count: 7, error: null }; // clustersMulti
+    const { body } = await callGet();
+    expect(body.clusters.avgArticlesPerMultiCluster).toBe(5.29);
+    // The all-clusters mean keeps its original denominator: 50 / 20 = 2.5.
+    expect(body.clusters.avgArticlesPerCluster).toBe(2.5);
+  });
+
+  it("sets avgArticlesPerMultiCluster to 0 when there are no multi-article clusters", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    currentCounts[7] = { count: 0, error: null }; // clustersMulti
+    const { body } = await callGet();
+    expect(body.clusters.multiArticle).toBe(0);
+    expect(body.clusters.avgArticlesPerMultiCluster).toBe(0);
   });
 });

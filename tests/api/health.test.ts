@@ -304,8 +304,10 @@ describe("GET /api/health", () => {
   //     threshold. The cluster-consumer Edge Function dequeues every minute,
   //     so a gap larger than 15 min means the consumer is stuck.
   //   - queues:     reads the `worker_metrics` view (filtered pgmq.metrics_all)
-  //     and downgrades to "degraded" when queue depth crosses 500 OR the
-  //     oldest visible message has been waiting more than 30 min.
+  //     and downgrades to "degraded" when queue depth crosses its per-queue
+  //     bound (cluster_work 500 / image_backfill 100), the oldest visible
+  //     message has been waiting more than 30 min, OR a row comes back with
+  //     a NULL / non-numeric queue_length (malformed view output).
   //
   // Both probes are intentionally NON-critical: they downgrade status to
   // "degraded" with HTTP 200, never to "unhealthy" / 503. The DB + env
@@ -399,18 +401,100 @@ describe("GET /api/health", () => {
     expect(body.checks.clustering.ok).toBe(true);
   });
 
+  it("returns 200 degraded when image_backfill exceeds its lower per-queue depth bound", async () => {
+    // 150 sits BETWEEN the two bounds: fine for cluster_work (500), over
+    // the line for image_backfill (100). If the route regressed to a single
+    // shared threshold this would pass as healthy — both error-string
+    // assertions below would then fail loudly.
+    responders.workerMetricsSelect = async () => ({
+      data: [
+        {
+          queue_name: "cluster_work",
+          queue_length: 150,
+          oldest_msg_age_sec: 30,
+        },
+        {
+          queue_name: "image_backfill",
+          queue_length: 150,
+          oldest_msg_age_sec: 10,
+        },
+      ],
+      error: null,
+    });
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.status).toBe("degraded");
+    expect(body.checks.queues.ok).toBe(false);
+    // The error must name the tripping queue + dimension + the bound that
+    // applied to it, not the cluster_work bound.
+    expect(body.checks.queues.error).toMatch(/image_backfill/);
+    expect(body.checks.queues.error).toMatch(/depth/i);
+    expect(body.checks.queues.error).toMatch(/100/);
+    expect(body.checks.queues.error).not.toMatch(/cluster_work/);
+  });
+
+  it("treats a NULL queue_length as a malformed row (degraded), not a healthy zero", async () => {
+    responders.workerMetricsSelect = async () => ({
+      data: [
+        {
+          queue_name: "cluster_work",
+          queue_length: null,
+          oldest_msg_age_sec: null,
+        },
+        {
+          queue_name: "image_backfill",
+          queue_length: 0,
+          oldest_msg_age_sec: null,
+        },
+      ],
+      error: null,
+    });
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.status).toBe("degraded");
+    expect(body.checks.queues.ok).toBe(false);
+    expect(body.checks.queues.error).toMatch(/malformed worker_metrics row/);
+    expect(body.checks.queues.error).toMatch(/cluster_work/);
+  });
+
+  it("treats a non-numeric queue_length as a malformed row", async () => {
+    responders.workerMetricsSelect = async () => ({
+      data: [
+        {
+          queue_name: "cluster_work",
+          queue_length: 3,
+          oldest_msg_age_sec: null,
+        },
+        {
+          queue_name: "image_backfill",
+          queue_length: "not-a-number",
+          oldest_msg_age_sec: null,
+        },
+      ],
+      error: null,
+    });
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.status).toBe("degraded");
+    expect(body.checks.queues.ok).toBe(false);
+    expect(body.checks.queues.error).toMatch(/malformed worker_metrics row/);
+    expect(body.checks.queues.error).toMatch(/image_backfill/);
+  });
+
   // ---------------------------------------------------------------------------
   // R4-P5: anonymous rate limit on the public `{status}` envelope path.
   //
   // The route wraps the anonymous branch with a token-bucket limiter of
-  // capacity 30 / refill 1 per second. A flood from a single client IP
-  // gets the first 30 probes through (capacity drain) and then 429s the
-  // 31st within the same 1-second window. The authenticated bearer path
-  // is exempt — monitoring infra has a legitimate need to probe at high
-  // cadence with the right secret.
+  // capacity 5 / refill 1 per second. The limiter is process-local, so the
+  // cap applies per instance, not globally — capacity is kept low so N
+  // instances × 5 bursts stays cheap against Supabase. A flood from a
+  // single client IP gets the first 5 probes through (capacity drain) and
+  // then 429s the 6th within the same 1-second window. The authenticated
+  // bearer path is exempt — monitoring infra has a legitimate need to
+  // probe at high cadence with the right secret.
   // ---------------------------------------------------------------------------
 
-  it("rate-limits anonymous callers: the 31st burst request in a 1s window returns 429", async () => {
+  it("rate-limits anonymous callers: the 6th burst request in a 1s window returns 429", async () => {
     // A unique client key isolates this bucket from any cross-test bleed
     // inside the shared rate-limiter module map.
     const clientIp = "203.0.113.77";
@@ -420,18 +504,18 @@ describe("GET /api/health", () => {
         headers: { "x-forwarded-for": clientIp },
       });
 
-    // 31 concurrent requests in the same event-loop tick — the bucket
+    // 6 concurrent requests in the same event-loop tick — the bucket
     // refills by `elapsedSec * 1` between calls, which over a fraction of
-    // a millisecond is effectively zero. Capacity 30 means the first 30
-    // each consume a token and the 31st sees `tokens < 1`.
+    // a millisecond is effectively zero. Capacity 5 means the first 5
+    // each consume a token and the 6th sees `tokens < 1`.
     const results = await Promise.all(
-      Array.from({ length: 31 }, () => callGet(buildReq())),
+      Array.from({ length: 6 }, () => callGet(buildReq())),
     );
 
     const allowed = results.filter((r) => r.status !== 429);
     const denied = results.filter((r) => r.status === 429);
 
-    expect(allowed.length).toBe(30);
+    expect(allowed.length).toBe(5);
     expect(denied.length).toBe(1);
 
     const limitedBody = denied[0]!.body as {
@@ -455,8 +539,8 @@ describe("GET /api/health", () => {
         },
       });
 
-    // 35 > capacity 30. If the bearer path were subject to the limiter,
-    // at least 5 of these would 429. We expect zero.
+    // 35 > capacity 5. If the bearer path were subject to the limiter,
+    // at least 30 of these would 429. We expect zero.
     const results = await Promise.all(
       Array.from({ length: 35 }, () => callGet(buildAuthedReq())),
     );
@@ -464,5 +548,50 @@ describe("GET /api/health", () => {
     expect(denied.length).toBe(0);
 
     delete process.env.CRON_SECRET;
+  });
+
+  // ---------------------------------------------------------------------------
+  // Shared bearer gate (`requireCronBearer` in src/lib/api/bearer.ts).
+  //
+  // The detailed envelope is gated by the same helper as /api/cron/headline
+  // and /api/metrics: case-insensitive scheme, constant-time token compare,
+  // FAIL-CLOSED 503 when CRON_SECRET is unset, 401 on a mismatched token.
+  // The legacy health-only posture (treat every caller as anonymous when
+  // the secret is missing or the token is wrong) is gone — these tests pin
+  // the migrated behaviour.
+  // ---------------------------------------------------------------------------
+
+  it("accepts a lowercase 'bearer' scheme (auth schemes are case-insensitive)", async () => {
+    const { status, body } = await callGet(
+      new Request("http://localhost/api/health", {
+        headers: { Authorization: `bearer ${TEST_CRON_SECRET}` },
+      }),
+    );
+    expect(status).toBe(200);
+    expect(body.status).toBe("healthy");
+    // Detailed envelope, not the anonymous summary — the lowercase scheme
+    // must authenticate, not silently downgrade.
+    expect(body.checks.database.ok).toBe(true);
+  });
+
+  it("returns 401 when the Authorization header carries the wrong token", async () => {
+    const { status, body } = await callGet(
+      new Request("http://localhost/api/health", {
+        headers: { Authorization: "Bearer not-the-right-token" },
+      }),
+    );
+    expect(status).toBe(401);
+    expect(body.checks).toBeUndefined();
+  });
+
+  it("FAIL-CLOSED: returns 503 when a bearer is presented but CRON_SECRET is unset", async () => {
+    delete process.env.CRON_SECRET;
+    const { status, body } = await callGet(
+      new Request("http://localhost/api/health", {
+        headers: { Authorization: `Bearer ${TEST_CRON_SECRET}` },
+      }),
+    );
+    expect(status).toBe(503);
+    expect(body.checks).toBeUndefined();
   });
 });

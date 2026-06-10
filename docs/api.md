@@ -4,9 +4,11 @@
 
 ### `GET /api/health`
 
-Health check. Returns subsystem status for database, environment, and ingestion freshness.
+Health check. Returns subsystem status for database, environment, ingestion freshness, clustering freshness, and queue depth.
 
-**Response** `200 | 503`:
+Two-tier response. Anonymous callers (no `Authorization` header) get only `{ "status", "timestamp" }` and are rate-limited (5-token bucket, 1 token/sec refill; the limiter is process-local, so the cap applies per serverless instance, not globally). Callers presenting `Authorization: Bearer <CRON_SECRET>` get the full per-check breakdown and bypass the rate limit; the bearer gate is the shared `requireCronBearer` helper (`src/lib/api/bearer.ts`) — case-insensitive scheme, constant-time compare, FAIL-CLOSED 503 when `CRON_SECRET` is unset/empty, 401 on a mismatched token.
+
+**Response** `200 | 503` (bearer-authenticated):
 ```json
 {
   "status": "healthy" | "degraded" | "unhealthy",
@@ -14,13 +16,18 @@ Health check. Returns subsystem status for database, environment, and ingestion 
   "checks": {
     "database": { "ok": true, "latencyMs": 42 },
     "env": { "ok": true, "missing": [] },
-    "ingestion": { "ok": true, "lastArticleAgeSec": 120 }
+    "ingestion": { "ok": true, "lastArticleAgeSec": 120 },
+    "clustering": { "ok": true, "lastClusterAgeSec": 300 },
+    "queues": { "ok": true, "metrics": [{ "queue": "cluster_work", "queueLength": 0, "oldestMsgAgeSec": null }, { "queue": "image_backfill", "queueLength": 0, "oldestMsgAgeSec": null }] }
   }
 }
 ```
 
 - `unhealthy` (503): database or env failure
-- `degraded` (200): ingestion stale (>10 min since last article)
+- `degraded` (200): ingestion stale (>10 min since last article), clustering stale (>15 min), queue alarm (per-queue depth bound — `cluster_work` >500, `image_backfill` >100 — or oldest message >30 min), or a malformed `worker_metrics` row (NULL / non-numeric `queue_length`)
+- `401`: `Authorization` header present but token mismatch
+- `503` + error envelope: `Authorization` header present but `CRON_SECRET` not configured (FAIL-CLOSED)
+- `429`: anonymous rate limit exhausted
 - Each subsystem check has a 2s timeout
 
 ---
@@ -29,15 +36,21 @@ Health check. Returns subsystem status for database, environment, and ingestion 
 
 Live counts for articles, clusters, and sources.
 
-**Response** `200` (cached 60s):
+**Headers**: `Authorization: Bearer <CRON_SECRET>` (required — same shared `requireCronBearer` gate as `/api/cron/headline`: 503 FAIL-CLOSED when `CRON_SECRET` is unset/empty, 401 on a mismatched token). Auth-gated operational data is served with `Cache-Control: no-store`.
+
+**Response** `200`:
 ```json
 {
   "timestamp": "...",
-  "articles": { "total": 22000, "last24h": 850, "lastHour": 42, "politicsNullImage": 15, "withImage": 20500 },
-  "clusters": { "total": 1200, "multiArticle": 980, "blindspots": 12, "avgArticlesPerCluster": 18.33 },
+  "articles": { "total": 22000, "last24h": 850, "lastHour": 42, "politicsNullImage": 250, "politicsTotal": 12500, "withImage": 20500, "politicsImageMissingRatio": 0.02 },
+  "clusters": { "total": 1200, "multiArticle": 980, "blindspots": 12, "avgArticlesPerCluster": 18.33, "avgArticlesPerMultiCluster": 22.22, "neutralizedEligible": 700, "neutralized": 665, "neutralizedRatio": 0.95, "oldestPendingNeutralAgeSec": 480 },
   "sources": { "total": 144, "active": 140 }
 }
 ```
+
+- `politicsImageMissingRatio`: `politicsNullImage / politicsTotal` (politics tier = `politika` + `son_dakika`), 2 decimals; 0 when `politicsTotal` is 0
+- `avgArticlesPerCluster` averages over ALL clusters (singletons included); `avgArticlesPerMultiCluster` averages only over multi-article clusters — `(total articles - singleton clusters) / multiArticle`, 2 decimals, 0 when `multiArticle` is 0
+- `neutralizedRatio`: `neutralized / neutralizedEligible`, 2 decimals; `oldestPendingNeutralAgeSec` is null when no eligible cluster is awaiting a neutral headline
 
 ---
 
@@ -83,7 +96,7 @@ LLM-generates neutral Turkish headlines (`title_tr_neutral`) for clusters that s
 
 **Headers**: `Authorization: Bearer <CRON_SECRET>` (required — the route is FAIL-CLOSED on a missing or empty `CRON_SECRET` in the runtime environment and returns 503 on every invocation in that case).
 
-Bearer comparison uses `crypto.timingSafeEqual`. Vercel cron supplies this header automatically when scheduled via `vercel.json` / `vercel.ts`.
+The bearer gate is the shared `requireCronBearer` helper (`src/lib/api/bearer.ts`): the scheme is matched case-insensitively and the token is compared with `crypto.timingSafeEqual`. Vercel cron supplies this header automatically when scheduled via `vercel.json` / `vercel.ts`.
 
 **Rate limit**: 5-token bucket, 1 token / 60 seconds refill. The cron itself ticks every 5 minutes so this exists mainly to absorb ad-hoc `curl` floods with a valid secret. Per-cycle wall budget: `maxDuration = 60s`.
 
